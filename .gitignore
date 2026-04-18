@@ -205,3 +205,35 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ======================
+# PitchIQ Project Rules
+# ======================
+
+# Raw datasets (large CSV files, never commit)
+data/raw/
+dataset/
+
+# Processed / feature-engineered data (auto-generated, reproducible)
+data/processed/
+data/external/
+
+# Trained model artifacts (large binary files)
+models/*.pkl
+models/*.joblib
+models/evaluation_report.json
+
+# Keep the feature_columns.json since it's lightweight and useful for reference
+# models/feature_columns.json  <-- intentionally tracked
+
+# Kaggle API credentials
+.kaggle/
+kaggle.json
+*.env
+
+# Streamlit runtime cache
+.streamlit/
+
+# OS files
+.DS_Store
+Thumbs.db
