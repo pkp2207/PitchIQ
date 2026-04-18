@@ -1,7 +1,4 @@
 import os
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import pandas as pd
 from pathlib import Path
 from src.data.loader import load_results, get_project_root
@@ -33,9 +30,15 @@ def clean_and_prepare_matches(cutoff_year: int = 1990) -> pd.DataFrame:
             
     df['outcome'] = df.apply(get_outcome, axis=1)
     
+    # Normalize the 'neutral' column to boolean-like int
+    if 'neutral' in df.columns:
+        df['neutral'] = df['neutral'].map(
+            lambda v: 1 if str(v).strip().upper() in ('TRUE', '1') else 0
+        )
+
     # Sort chronologically (very important for rolling features)
     df = df.sort_values(by='date').reset_index(drop=True)
-    
+
     return df
 
 if __name__ == "__main__":
