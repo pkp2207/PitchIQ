@@ -215,7 +215,8 @@ data/raw/
 dataset/
 
 # Processed / feature-engineered data (auto-generated, reproducible)
-data/processed/
+data/processed/*
+!data/processed/features.csv
 data/external/
 
 # Trained model artifacts (large binary files)
@@ -224,6 +225,9 @@ models/*.joblib
 models/evaluation_report.json
 models/tuned_params.json
 models/thresholds.json
+!models/best_model.pkl
+!models/thresholds.json
+!models/feature_columns.json
 
 # Keep the feature_columns.json since it's lightweight and useful for reference
 # models/feature_columns.json  <-- intentionally tracked
@@ -234,7 +238,8 @@ kaggle.json
 *.env
 
 # Streamlit runtime cache
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 
 # OS files
 .DS_Store
