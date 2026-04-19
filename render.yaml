@@ -3,7 +3,6 @@ services:
     name: pitchiq
     env: docker
     dockerfilePath: ./Dockerfile
-    staticPublicPath: /app/static
     
     # Resource allocation
     plan: standard
