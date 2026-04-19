@@ -195,6 +195,13 @@ class MatchPredictor:
                 match_features[col] = away_stats['away_elo_before'] if away_stats is not None else 1500
             elif col == 'elo_diff':
                 match_features[col] = match_features.get('home_elo_before', 1500) - match_features.get('away_elo_before', 1500)
+            elif col == 'squad_value_diff':
+                match_features[col] = match_features.get('home_squad_value', 0) - match_features.get('away_squad_value', 0)
+            elif col == 'sentiment_diff':
+                match_features[col] = match_features.get('home_sentiment_avg', 0) - match_features.get('away_sentiment_avg', 0)
+            elif col in ('home_sentiment_volume', 'away_sentiment_volume'):
+                # Volume defaults to 0 (no sentiment data at inference time)
+                match_features[col] = 0
             elif col.startswith('h2h_'):
                 if latest_h2h is not None:
                     if latest_h2h['home_team'] == home_team:

@@ -30,7 +30,11 @@ A machine learning project that predicts the outcome of international football m
 
 International football is inherently unpredictable, yet patterns in historical data reveal meaningful signals — teams in strong recent form, favorable head-to-head records, and ranking advantages all correlate with match outcomes. This project builds a systematic, data-driven pipeline to quantify these signals and translate them into probabilistic match predictions.
 
-The predictor ingests over 150 years of international match records, engineers contextually rich features, and trains classification models to estimate the probability of a Win, Loss, or Draw for a given home team. The project is structured in phases to allow incremental improvement, starting from a core statistical model and extending toward player-level and sentiment-enriched predictions.
+The predictor ingests over 150 years of international match records, engineers contextually rich features, and trains classification models to estimate the probability of a Win, Loss, or Draw for a given home team. The project is structured in three phases:
+
+- **Phase 1** (implemented): Core pipeline with Elo, form, H2H, streak, and contextual features + Streamlit web app
+- **Phase 2** (implemented): Squad strength features derived from Transfermarkt player market values and age profiles
+- **Phase 3** (in progress): Pre-match sentiment analysis from news/social media using transformer-based NLP
 
 **Why this project matters:**
 
@@ -45,6 +49,8 @@ The predictor ingests over 150 years of international match records, engineers c
 - SHAP-based feature attribution explaining which factors drove each prediction
 - Optuna-powered hyperparameter tuning for optimal model selection
 - Probability calibration for reliable confidence estimates
+- Squad-level features from Transfermarkt player data (market value, age profiles)
+- Pre-match sentiment features from news/social media coverage (Phase 3)
 
 ---
 
@@ -58,12 +64,12 @@ The predictor ingests over 150 years of international match records, engineers c
 - **Soft-voting ensemble**: Optional `--ensemble` mode that combines top-performing models via averaged probabilities, used when it beats or ties the best individual model
 - **Class imbalance handling**: Balanced class weights for LogisticRegression/RandomForest and balanced sample weights for GradientBoosting/HistGradientBoosting
 - **6 model candidates**: Logistic Regression, Random Forest, Gradient Boosting, HistGradientBoosting, XGBoost, and LightGBM (last two optional, require libomp)
-- **29 engineered features**: Elo ratings, rolling form (win rate, goals, goal difference), head-to-head records, win/loss streaks, days since last match, and home advantage
+- **34 engineered features** (39 with sentiment): Elo ratings, rolling form (win rate, goals, goal difference), head-to-head records, win/loss streaks, days since last match, home advantage, squad market value, squad age, and pre-match sentiment
+- **Squad strength integration** *(Phase 2)*: 5 features derived from Transfermarkt player data — home/away squad market value (log-scaled), squad value differential, and home/away average squad age
+- **Sentiment analysis** *(Phase 3, in progress)*: 5 features derived from pre-match news/social media — home/away average sentiment, sentiment differential, and home/away sentiment volume
 - **Modular pipeline**: Each stage — data cleaning, feature engineering, tuning, training, inference — is independently executable
-- **Interactive Streamlit interface**: Allows non-technical users to explore predictions through a browser-based UI with prediction cards, SHAP charts, and head-to-head history tables
-- **Comprehensive test suite**: 47 pytest tests covering feature engineering (Elo, form, H2H, streaks, days-since-last), model predictions, ensemble behavior, and pipeline integration
-- **Player strength integration** *(Phase 2)*: Augments match-level features with squad-level market value and ratings from Transfermarkt
-- **Sentiment analysis** *(Phase 3, optional)*: Incorporates pre-match sentiment signals derived from news and social media using transformer-based NLP models
+- **Interactive Streamlit interface**: Team stats cards, prediction cards with outcome badge and probability bar, SHAP feature attribution chart, head-to-head history table, Elo rating history chart, and sentiment card (Phase 3)
+- **Comprehensive test suite**: 62 pytest tests covering feature engineering (Elo, form, H2H, streaks, days-since-last, squad strength, sentiment), model predictions, ensemble behavior, and pipeline integration
 
 ---
 
@@ -87,11 +93,11 @@ This dataset contains the results of every recorded international men's football
 | `country` | Country where the match was played |
 | `neutral` | Boolean flag indicating whether the venue was neutral |
 
-### 2. Transfermarkt Player Data
+### 2. Transfermarkt Player Data *(Phase 2)*
 
 **Source:** [Kaggle — Player Scores by David Cariboo](https://www.kaggle.com/datasets/davidcariboo/player-scores)
 
-This dataset provides player-level statistics, market values, and club affiliations scraped from Transfermarkt. It is used in Phase 2 to construct squad strength features for each national team.
+This dataset provides player-level statistics, market values, and club affiliations scraped from Transfermarkt. It is used in Phase 2 to construct squad strength features for each national team. A synthetic sample can be generated via `scripts/generate_sample_players.py`.
 
 | Column | Description |
 |---|---|
@@ -101,12 +107,20 @@ This dataset provides player-level statistics, market values, and club affiliati
 | `position` | Player position (e.g., goalkeeper, midfielder) |
 | `country_of_citizenship` | National team eligibility |
 | `club_name` | Current club affiliation |
+| `date_of_birth` | Player date of birth (used for age calculation) |
 
-### 3. Sentiment Analysis *(Optional — Phase 3)*
+### 3. Sentiment Data *(Phase 3, in progress)*
 
 **Reference:** [Hugging Face — Sentiment Analysis with Python](https://huggingface.co/blog/sentiment-analysis-python)
 
-Pre-match sentiment is derived from news headlines and social media commentary using a pre-trained transformer model from the Hugging Face ecosystem. Sentiment polarity scores are computed per team and incorporated as additional input features.
+Pre-match sentiment is derived from news headlines and social media commentary using a pre-trained transformer model from the Hugging Face ecosystem. Sentiment polarity scores are computed per team and incorporated as additional input features. A synthetic sample can be generated via `scripts/generate_sample_sentiment.py`.
+
+| Column | Description |
+|---|---|
+| `date` | Date of the sentiment entry |
+| `team` | National team the sentiment relates to |
+| `sentiment_score` | Polarity score in [-1, 1] (negative to positive) |
+| `headline` | Source headline or text snippet |
 
 ---
 
@@ -122,7 +136,7 @@ Pre-match sentiment is derived from news headlines and social media commentary u
 
 ### 2. Feature Engineering
 
-Raw match records are transformed into a rich feature matrix capturing team form, historical dominance, and contextual match factors. Key engineered features are described in detail in the [Feature Engineering Highlights](#feature-engineering-highlights) section.
+Raw match records are transformed into a rich feature matrix capturing team form, historical dominance, squad strength, sentiment, and contextual match factors. Key engineered features are described in detail in the [Feature Engineering Highlights](#feature-engineering-highlights) section. The pipeline orchestrates feature modules in sequence: Elo -> Form -> H2H -> Streak -> Squad Strength -> Sentiment (optional).
 
 ### 3. Model Selection
 
@@ -172,46 +186,52 @@ Models are evaluated on a temporally held-out test set (last 10% of matches) to 
 
 Feature engineering is the most consequential stage of this pipeline. The following features are constructed for each match:
 
-**Recent Form**
+**Recent Form** (16 features)
 - Rolling win rate over the last 5 and 10 matches for both home and away teams
 - Average goals scored and conceded over the same rolling windows
 - Average goal difference over the last 5 and 10 matches (`goal_diff_avg_5`, `goal_diff_avg_10`)
 - Uses `shift(1).rolling()` to strictly avoid data leakage (only past matches used)
 
-**Momentum and Rest**
+**Momentum and Rest** (4 features)
 - Win/loss streak: positive values indicate consecutive wins, negative values indicate consecutive losses, 0 indicates the last result was a draw
 - Days since last match: calendar days since the team last played any match (home or away), default 30 for a team's first match
 - Iterates chronologically over a stacked team-level view for correct tracking regardless of home/away role
 
-**Home Advantage**
+**Home Advantage** (1 feature)
 - Rolling win rate over the team's last 10 home matches (`home_advantage`)
 - Only considers matches where the team was the home side
 - Captures venue-specific performance trends beyond the binary neutral flag
 
-**Head-to-Head Record**
+**Head-to-Head Record** (3 features)
 - Historical win rate of the home team in direct matchups against the away team
 - Average goal difference in previous encounters
 - Number of prior meetings (used as a confidence weight)
 - Uses `tuple(sorted([home, away]))` as a symmetric matchup key
 
-**Ranking and Prestige**
+**Ranking and Prestige** (3 features)
 - Elo ratings constructed from the historical match record (base 1500, K=32)
 - Elo rating gap between home and away team prior to kickoff (`elo_diff`)
 - Ratings updated after each match chronologically
 
-**Venue and Context**
+**Venue and Context** (2 features)
 - Whether the match is played at a neutral venue
 - Tournament type encoded as a binary feature (`is_friendly`)
 - Tournament importance weights available via `tournament_to_weight()` helper
 
-**Squad Strength** *(Phase 2)*
-- Aggregate market value of the starting squad derived from Transfermarkt data
-- Market value differential between home and away squads
-- Positional breakdown: attacking vs. defensive squad value ratio
+**Squad Strength** *(Phase 2)* (5 features)
+- Aggregate market value of each squad derived from Transfermarkt data (log-scaled via `log1p`)
+- Market value differential between home and away squads (`squad_value_diff`)
+- Average squad age for home and away teams
+- Teams without player data receive a default value (log1p of 500,000 for value, 27.0 for age)
 
-**Sentiment Score** *(Phase 3, optional)*
-- Average sentiment polarity of pre-match news headlines for each team
-- Sentiment differential between home and away team coverage
+**Sentiment Score** *(Phase 3, in progress)* (5 features)
+- Average sentiment polarity of pre-match news/social media for each team (`home_sentiment_avg`, `away_sentiment_avg`)
+- Sentiment differential between home and away team coverage (`sentiment_diff`)
+- Volume of sentiment entries per team (`home_sentiment_volume`, `away_sentiment_volume`)
+- Only sentiment from before the match date is used (no future leakage)
+- Teams with no sentiment data default to 0.0
+
+**Total: 34 features** (39 when sentiment is enabled)
 
 ---
 
@@ -235,59 +255,66 @@ Note: No performance numbers are hardcoded in this README. Actual results depend
 
 ```
 PitchIQ/
-│
-├── data/
-│   ├── raw/                    # Original downloaded datasets (not committed to Git)
-│   └── processed/              # Cleaned and feature-engineered datasets
-│
-├── scripts/
-│   ├── generate_sample_data.py # Generate synthetic 500-row dataset for development
-│   └── download_data.py        # Download real datasets from Kaggle
-│
-├── src/
-│   ├── data/
-│   │   ├── loader.py           # Data loading utilities and get_project_root()
-│   │   └── cleaner.py          # Data cleaning and target encoding
-│   ├── features/
-│   │   ├── pipeline.py         # Feature pipeline orchestrator (Elo -> Form -> H2H -> Streak)
-│   │   ├── elo.py              # Elo rating computation
-│   │   ├── form.py             # Rolling form, goal diff avg, and home advantage
-│   │   ├── head_to_head.py     # Head-to-head statistics
-│   │   └── streak.py           # Win/loss streaks and days-since-last-match
-│   ├── models/
-│   │   ├── train.py            # Model training, selection, calibration, and threshold optimization
-│   │   ├── tune.py             # Optuna hyperparameter tuning
-│   │   ├── threshold.py        # Per-class decision threshold tuning
-│   │   ├── ensemble.py         # Soft-voting ensemble of top models
-│   │   ├── predict.py          # Inference with SHAP explanations and threshold application
-│   │   └── evaluate.py         # Evaluation metrics (raw vs threshold-adjusted)
-│   └── utils/
-│       └── helpers.py          # Team name normalization, tournament weights
-│
-├── app/
-│   ├── streamlit_app.py        # Main Streamlit application
-│   ├── components/
-│   │   ├── prediction_card.py  # Outcome badge + probability bar
-│   │   ├── feature_attribution.py # SHAP value horizontal bar chart
-│   │   └── h2h_table.py        # Head-to-head history table
-│   └── assets/                 # Static assets (logos, CSS)
-│
-├── models/
-│   ├── best_model.pkl          # Serialized trained model (gitignored)
-│   ├── feature_columns.json    # Feature schema for inference alignment
-│   ├── thresholds.json         # Per-class decision thresholds (gitignored)
-│   ├── evaluation_report.json  # Latest evaluation metrics (gitignored)
-│   └── tuned_params.json       # Optuna tuning results (gitignored)
-│
-├── tests/
-│   ├── conftest.py             # Shared test fixtures (20-match sample)
-│   ├── test_features.py        # Tests for Elo, form, H2H, streak, and days-since-last features (27 tests)
-│   └── test_models.py          # Tests for predictor API, ensemble behavior, and pipeline integration (20 tests)
-│
-├── pyproject.toml              # Project config, editable install, pytest config
-├── requirements.txt
-├── CLAUDE.md
-└── README.md
+|
++-- data/
+|   +-- raw/                    # Original downloaded datasets (not committed to Git)
+|   +-- processed/              # Cleaned and feature-engineered datasets
+|
++-- scripts/
+|   +-- generate_sample_data.py     # Generate synthetic 500-row match dataset
+|   +-- generate_sample_players.py  # Generate synthetic Transfermarkt player data
+|   +-- generate_sample_sentiment.py # Generate synthetic sentiment data (Phase 3)
+|   +-- download_data.py            # Download real datasets from Kaggle
+|
++-- src/
+|   +-- data/
+|   |   +-- loader.py           # Data loading utilities and get_project_root()
+|   |   +-- cleaner.py          # Data cleaning and target encoding
+|   +-- features/
+|   |   +-- pipeline.py         # Feature pipeline orchestrator (Elo -> Form -> H2H -> Streak -> Squad -> Sentiment)
+|   |   +-- elo.py              # Elo rating computation
+|   |   +-- form.py             # Rolling form, goal diff avg, and home advantage
+|   |   +-- head_to_head.py     # Head-to-head statistics
+|   |   +-- streak.py           # Win/loss streaks and days-since-last-match
+|   |   +-- squad_strength.py   # Squad market value and age features (Phase 2)
+|   |   +-- sentiment.py        # Pre-match sentiment features (Phase 3, in progress)
+|   +-- models/
+|   |   +-- train.py            # Model training, selection, calibration, and threshold optimization
+|   |   +-- tune.py             # Optuna hyperparameter tuning
+|   |   +-- threshold.py        # Per-class decision threshold tuning
+|   |   +-- ensemble.py         # Soft-voting ensemble of top models
+|   |   +-- predict.py          # Inference with SHAP explanations and threshold application
+|   |   +-- evaluate.py         # Evaluation metrics (raw vs threshold-adjusted)
+|   +-- utils/
+|       +-- helpers.py          # Team name normalization, tournament weights
+|
++-- app/
+|   +-- streamlit_app.py        # Main Streamlit application
+|   +-- components/
+|   |   +-- prediction_card.py  # Outcome badge + probability bar
+|   |   +-- feature_attribution.py # SHAP value horizontal bar chart
+|   |   +-- h2h_table.py        # Head-to-head history table
+|   |   +-- team_stats.py       # Pre-prediction team stats cards (Elo, form, record)
+|   |   +-- elo_chart.py        # Elo rating history line chart
+|   |   +-- sentiment_card.py   # Pre-match sentiment display card (Phase 3)
+|   +-- assets/                 # Static assets (logos, CSS)
+|
++-- models/
+|   +-- best_model.pkl          # Serialized trained model (gitignored)
+|   +-- feature_columns.json    # Feature schema for inference alignment
+|   +-- thresholds.json         # Per-class decision thresholds (gitignored)
+|   +-- evaluation_report.json  # Latest evaluation metrics (gitignored)
+|   +-- tuned_params.json       # Optuna tuning results (gitignored)
+|
++-- tests/
+|   +-- conftest.py             # Shared test fixtures (20-match sample, player sample, sentiment sample)
+|   +-- test_features.py        # Tests for Elo, form, H2H, streak, days-since-last, squad strength, sentiment (42 tests)
+|   +-- test_models.py          # Tests for predictor API, ensemble behavior, and pipeline integration (20 tests)
+|
++-- pyproject.toml              # Project config, editable install, pytest config
++-- requirements.txt
++-- CLAUDE.md
++-- README.md
 ```
 
 ---
@@ -332,6 +359,8 @@ pip install -r requirements.txt
 
 ```bash
 python scripts/generate_sample_data.py
+python scripts/generate_sample_players.py
+python scripts/generate_sample_sentiment.py
 ```
 
 **Option B: Download real Kaggle datasets (~45k matches):**
@@ -378,9 +407,12 @@ The application will open in your browser at `http://localhost:8501`.
 5. Click **Predict Outcome**.
 
 The app displays:
-- A colored outcome badge (green=Win, yellow=Draw, red=Loss) with a stacked probability bar
-- A SHAP feature attribution chart showing which factors drove the prediction
-- A head-to-head history table with win/draw/loss tallies
+- **Team Stats Cards** — Pre-prediction summary of each team's current Elo rating, recent form, and record
+- **Prediction Card** — A colored outcome badge (green=Win, yellow=Draw, red=Loss) with a stacked probability bar
+- **SHAP Feature Attribution** — A horizontal bar chart showing which factors drove the prediction (teal=positive, orange=negative)
+- **Head-to-Head History** — A table with the last N encounters and win/draw/loss tallies
+- **Elo Rating History** — A line chart tracking both teams' Elo ratings over time
+- **Sentiment Card** *(Phase 3)* — Pre-match sentiment summary for each team
 
 ### Training with Hyperparameter Tuning
 
@@ -441,21 +473,25 @@ python -m src.models.evaluate
 **UI sections:**
 
 - Team selection interface with dropdown menus
+- Pre-prediction team stats cards with Elo ratings and recent form
 - Probability output displayed as a horizontal stacked bar chart (green/yellow/red)
 - SHAP feature attribution panel with horizontal bar chart (teal/orange)
 - Historical head-to-head summary table with win/draw/loss metrics
+- Elo rating history line chart tracking both teams over time
+- Pre-match sentiment card (Phase 3)
 
 ---
 
 ## Future Improvements
 
-- **Player-level modeling**: Incorporate individual player ratings and injury status to generate a dynamic pre-match squad strength score
-- **Sentiment analysis integration**: Use a Hugging Face transformer model to score pre-match press coverage and social media sentiment as additional features
+- **Complete sentiment integration**: Finish Phase 3 sentiment analysis pipeline with live news/social media ingestion
 - **Real-time predictions**: Connect to a live football data API to enable predictions for upcoming scheduled fixtures
 - **REST API deployment**: Wrap the inference pipeline in a FastAPI service and deploy to a cloud platform (e.g., AWS, Render, Railway)
 - **Temporal model updating**: Implement an online learning or periodic retraining schedule to incorporate the most recent match results automatically
 - **CI/CD pipeline**: GitHub Actions workflow to run `generate_sample_data -> pipeline -> pytest` on every push
 - **Multi-label confidence intervals**: Report uncertainty bounds on predicted probabilities to communicate model confidence
+- **Injury and suspension data**: Incorporate real-time squad availability information
+- **Live Transfermarkt updates**: Auto-refresh player market values for squad strength features
 
 ---
 
@@ -474,6 +510,8 @@ This project reinforced several principles that apply broadly across applied mac
 **Draws are the hardest class to predict.** Class imbalance is severe for Draw outcomes. Addressing this through class weighting, oversampling, or threshold tuning is essential to avoid a model that effectively ignores draws entirely.
 
 **Domain knowledge accelerates progress.** Understanding that Friendly matches carry less competitive signal, or that teams often field weakened squads in non-competitive fixtures, directly informed feature design decisions that would not be obvious from the data alone.
+
+**Multi-source features compound value.** Adding squad strength from Transfermarkt data and pre-match sentiment provides orthogonal signals that pure match history cannot capture. Each new data source improves the model's ability to handle novel matchups and shifting team dynamics.
 
 ---
 

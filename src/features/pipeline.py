@@ -1,12 +1,14 @@
 import os
 import pandas as pd
 from pathlib import Path
-from src.data.loader import get_project_root
+from src.data.loader import get_project_root, load_players, load_sentiment
 from src.data.cleaner import clean_and_prepare_matches
 from src.features.elo import compute_elo_features
 from src.features.form import compute_team_form
 from src.features.head_to_head import compute_h2h_features
 from src.features.streak import compute_streak_features
+from src.features.squad_strength import compute_squad_features
+from src.features.sentiment import compute_sentiment_features
 
 def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
     print("Loading and cleaning data...")
@@ -23,6 +25,36 @@ def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
 
     print("Computing streak and rest features...")
     df = compute_streak_features(df)
+
+    # Phase 2: Squad strength features from Transfermarkt player data
+    try:
+        players_df = load_players()
+        print("Computing squad strength features...")
+        df = compute_squad_features(df, players_df)
+    except FileNotFoundError:
+        print("WARNING: Player data not found — skipping squad strength features.")
+        print("  Run: python scripts/generate_sample_players.py")
+        # Add placeholder columns so the rest of the pipeline doesn't break
+        df['home_squad_value'] = 0.0
+        df['away_squad_value'] = 0.0
+        df['squad_value_diff'] = 0.0
+        df['home_avg_age'] = 0.0
+        df['away_avg_age'] = 0.0
+
+    # Phase 3: Sentiment features from news/social media data
+    try:
+        sentiment_df = load_sentiment()
+        print("Computing sentiment features...")
+        df = compute_sentiment_features(df, sentiment_df)
+    except FileNotFoundError:
+        print("WARNING: Sentiment data not found — skipping sentiment features.")
+        print("  Run: python scripts/generate_sample_sentiment.py")
+        # Add placeholder columns so the rest of the pipeline doesn't break
+        df['home_sentiment_avg'] = 0.0
+        df['away_sentiment_avg'] = 0.0
+        df['sentiment_diff'] = 0.0
+        df['home_sentiment_volume'] = 0
+        df['away_sentiment_volume'] = 0
 
     # Process additional features
     df['neutral'] = df['neutral'].astype(int)
@@ -44,6 +76,10 @@ def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
         'h2h_home_win_rate', 'h2h_avg_goal_diff', 'h2h_num_meetings',
         'home_streak', 'away_streak',
         'home_days_since_last', 'away_days_since_last',
+        'home_squad_value', 'away_squad_value', 'squad_value_diff',
+        'home_avg_age', 'away_avg_age',
+        'home_sentiment_avg', 'away_sentiment_avg', 'sentiment_diff',
+        'home_sentiment_volume', 'away_sentiment_volume',
         'outcome' # Target variable
     ]
     

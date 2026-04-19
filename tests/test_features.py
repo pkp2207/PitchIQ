@@ -5,6 +5,8 @@ from src.features.elo import EloSystem, compute_elo_features
 from src.features.form import compute_team_form
 from src.features.head_to_head import compute_h2h_features
 from src.features.streak import compute_streak_features
+from src.features.squad_strength import compute_squad_features
+from src.features.sentiment import compute_sentiment_features
 
 
 class TestEloSystem:
@@ -219,3 +221,189 @@ class TestDaysSinceLastFeatures:
         second = brazil_home.iloc[1]
         # Brazil plays home Jan 1, then away Mar 1, then home May 1 => ~61 days from Mar
         assert second["home_days_since_last"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Squad Strength Features (Phase 2)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sample_players():
+    """A small synthetic players DataFrame for testing squad strength features."""
+    data = [
+        # Brazil — 3 players, high value
+        (1, "Player A", "Brazil", 50_000_000, "Centre-Forward", "1995-06-15", "FC Barcelona"),
+        (2, "Player B", "Brazil", 30_000_000, "Goalkeeper", "1990-01-10", "Real Madrid"),
+        (3, "Player C", "Brazil", 40_000_000, "Central Midfield", "1998-03-20", "Liverpool FC"),
+        # Argentina — 3 players, slightly lower value
+        (4, "Player D", "Argentina", 25_000_000, "Centre-Forward", "1993-06-24", "PSG"),
+        (5, "Player E", "Argentina", 20_000_000, "Centre-Back", "1991-02-05", "Juventus"),
+        (6, "Player F", "Argentina", 15_000_000, "Left Winger", "1997-11-30", "Inter Milan"),
+        # Germany — 2 players
+        (7, "Player G", "Germany", 45_000_000, "Attacking Midfield", "1999-07-01", "Bayern Munich"),
+        (8, "Player H", "Germany", 35_000_000, "Right-Back", "1996-09-12", "Dortmund"),
+        # France — 2 players
+        (9, "Player I", "France", 60_000_000, "Centre-Forward", "2000-12-20", "PSG"),
+        (10, "Player J", "France", 10_000_000, "Goalkeeper", "1988-04-15", "Lyon"),
+    ]
+    df = pd.DataFrame(data, columns=[
+        "player_id", "name", "country_of_citizenship", "market_value_in_eur",
+        "position", "date_of_birth", "club_name",
+    ])
+    df["date_of_birth"] = pd.to_datetime(df["date_of_birth"])
+    return df
+
+
+class TestSquadStrengthFeatures:
+    def test_squad_columns_added(self, sample_matches, sample_players):
+        df = compute_squad_features(sample_matches, sample_players)
+        expected_cols = [
+            "home_squad_value", "away_squad_value", "squad_value_diff",
+            "home_avg_age", "away_avg_age",
+        ]
+        for col in expected_cols:
+            assert col in df.columns, f"Missing column: {col}"
+
+    def test_row_count_preserved(self, sample_matches, sample_players):
+        original_len = len(sample_matches)
+        df = compute_squad_features(sample_matches, sample_players)
+        assert len(df) == original_len
+
+    def test_squad_value_diff_is_correct(self, sample_matches, sample_players):
+        df = compute_squad_features(sample_matches, sample_players)
+        for _, row in df.iterrows():
+            assert row["squad_value_diff"] == pytest.approx(
+                row["home_squad_value"] - row["away_squad_value"]
+            )
+
+    def test_elite_team_has_higher_value(self, sample_matches, sample_players):
+        """Brazil (120M total) should have higher squad value than Argentina (60M)."""
+        df = compute_squad_features(sample_matches, sample_players)
+        # First match: Brazil (home) vs Argentina (away)
+        first = df.iloc[0]
+        assert first["home_squad_value"] > first["away_squad_value"]
+        assert first["squad_value_diff"] > 0
+
+    def test_unknown_team_gets_default(self, sample_players):
+        """A team not in the player data should get a default value, not NaN."""
+        matches = pd.DataFrame({
+            "date": pd.to_datetime(["2020-01-01"]),
+            "home_team": ["Tuvalu"],
+            "away_team": ["Brazil"],
+            "home_score": [0],
+            "away_score": [5],
+            "outcome": [-1],
+        })
+        df = compute_squad_features(matches, sample_players)
+        assert not pd.isna(df.iloc[0]["home_squad_value"])
+        assert df.iloc[0]["home_squad_value"] > 0  # default is log1p(500_000)
+
+    def test_avg_age_is_reasonable(self, sample_matches, sample_players):
+        df = compute_squad_features(sample_matches, sample_players)
+        assert (df["home_avg_age"] >= 15).all()
+        assert (df["home_avg_age"] <= 45).all()
+        assert (df["away_avg_age"] >= 15).all()
+        assert (df["away_avg_age"] <= 45).all()
+
+    def test_no_nan_values(self, sample_matches, sample_players):
+        df = compute_squad_features(sample_matches, sample_players)
+        squad_cols = [
+            "home_squad_value", "away_squad_value", "squad_value_diff",
+            "home_avg_age", "away_avg_age",
+        ]
+        for col in squad_cols:
+            assert df[col].isna().sum() == 0, f"NaN found in {col}"
+
+    def test_original_columns_preserved(self, sample_matches, sample_players):
+        """compute_squad_features should not remove any existing columns."""
+        original_cols = set(sample_matches.columns)
+        df = compute_squad_features(sample_matches, sample_players)
+        assert original_cols.issubset(set(df.columns))
+
+
+# ---------------------------------------------------------------------------
+# Sentiment Features (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class TestSentimentFeatures:
+    EXPECTED_COLS = [
+        "home_sentiment_avg",
+        "away_sentiment_avg",
+        "sentiment_diff",
+        "home_sentiment_volume",
+        "away_sentiment_volume",
+    ]
+
+    def test_sentiment_columns_added(self, sample_matches, sample_sentiment):
+        """All 5 sentiment columns should be present after computing features."""
+        df = compute_sentiment_features(sample_matches, sample_sentiment)
+        for col in self.EXPECTED_COLS:
+            assert col in df.columns, f"Missing column: {col}"
+
+    def test_row_count_preserved(self, sample_matches, sample_sentiment):
+        """Output should have the same number of rows as the input matches."""
+        original_len = len(sample_matches)
+        df = compute_sentiment_features(sample_matches, sample_sentiment)
+        assert len(df) == original_len
+
+    def test_sentiment_diff_is_correct(self, sample_matches, sample_sentiment):
+        """sentiment_diff should equal home_sentiment_avg - away_sentiment_avg."""
+        df = compute_sentiment_features(sample_matches, sample_sentiment)
+        for _, row in df.iterrows():
+            assert row["sentiment_diff"] == pytest.approx(
+                row["home_sentiment_avg"] - row["away_sentiment_avg"]
+            )
+
+    def test_no_future_sentiment_used(self, sample_matches, sample_sentiment):
+        """Sentiment from after the match date must NOT influence the features.
+
+        The sample_sentiment fixture includes a Brazil entry on 2021-09-15 with
+        score 0.99.  The last match is 2021-08-01.  If future leakage exists,
+        Brazil's sentiment avg for the final match would be pulled toward 0.99.
+        We verify it is not.
+        """
+        df = compute_sentiment_features(sample_matches, sample_sentiment)
+
+        # Last match (2021-08-01): Argentina vs France
+        # Check the Brazil home sentiment on the last Brazil match (2021-07-01,
+        # row index 18: Brazil vs Germany).
+        brazil_home_rows = df[df["home_team"] == "Brazil"]
+        last_brazil = brazil_home_rows.iloc[-1]
+        # The future entry (0.99) should NOT be included; avg should be < 0.99
+        assert last_brazil["home_sentiment_avg"] < 0.99
+
+    def test_missing_sentiment_defaults_to_zero(self, sample_matches, sample_sentiment):
+        """Teams with no sentiment data should get 0.0 for avg and 0 for volume."""
+        # Create a match with a team that has no sentiment data at all
+        unknown_match = pd.DataFrame({
+            "date": pd.to_datetime(["2020-06-01"]),
+            "home_team": ["Tuvalu"],
+            "away_team": ["Nauru"],
+            "home_score": [1],
+            "away_score": [0],
+            "tournament": ["Friendly"],
+            "city": ["Funafuti"],
+            "country": ["Tuvalu"],
+            "neutral": [0],
+            "outcome": [1],
+        })
+        df = compute_sentiment_features(unknown_match, sample_sentiment)
+        assert df.iloc[0]["home_sentiment_avg"] == pytest.approx(0.0)
+        assert df.iloc[0]["away_sentiment_avg"] == pytest.approx(0.0)
+        assert df.iloc[0]["home_sentiment_volume"] == 0
+        assert df.iloc[0]["away_sentiment_volume"] == 0
+
+    def test_sentiment_score_bounded(self, sample_matches, sample_sentiment):
+        """Average sentiment scores should be in [-1, 1]."""
+        df = compute_sentiment_features(sample_matches, sample_sentiment)
+        assert (df["home_sentiment_avg"] >= -1.0).all()
+        assert (df["home_sentiment_avg"] <= 1.0).all()
+        assert (df["away_sentiment_avg"] >= -1.0).all()
+        assert (df["away_sentiment_avg"] <= 1.0).all()
+
+    def test_volume_non_negative(self, sample_matches, sample_sentiment):
+        """Sentiment volume (count of articles/entries) should be >= 0."""
+        df = compute_sentiment_features(sample_matches, sample_sentiment)
+        assert (df["home_sentiment_volume"] >= 0).all()
+        assert (df["away_sentiment_volume"] >= 0).all()

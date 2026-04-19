@@ -1,3 +1,6 @@
 from app.components.prediction_card import render_prediction_card
 from app.components.feature_attribution import render_feature_attribution
 from app.components.h2h_table import render_h2h_table
+from app.components.team_stats import render_team_stats
+from app.components.elo_chart import render_elo_chart
+from app.components.sentiment_card import render_sentiment_card
