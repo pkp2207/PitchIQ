@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: pitchiq
+    env: docker
+    dockerfilePath: ./Dockerfile
+    staticPublicPath: /app/static
+    
+    # Resource allocation
+    plan: standard
+    numInstances: 1
+    
+    # Environment variables
+    envVars:
+      - key: STREAMLIT_SERVER_HEADLESS
+        value: "true"
+      - key: STREAMLIT_SERVER_PORT
+        value: "8501"
+      - key: STREAMLIT_SERVER_ADDRESS
+        value: "0.0.0.0"
+      - key: STREAMLIT_LOGGER_LEVEL
+        value: "info"
+    
+    # Build configuration
+    buildCommand: "pip install -e . && pip install -r requirements.txt"
+    
+    # Optional: Set up data
+    # preDeployCommand: "python scripts/generate_sample_data.py && python scripts/generate_sample_players.py && python scripts/generate_sample_sentiment.py"

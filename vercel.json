@@ -1,0 +1,23 @@
+{
+  "name": "pitchiq",
+  "version": 2,
+  "buildCommand": "echo 'Vercel deployment for Streamlit via Docker'",
+  "outputDirectory": ".",
+  "framework": "python",
+  "regions": ["iad"],
+  "git": {
+    "deploymentEnabled": {
+      "main": true
+    }
+  },
+  "env": {
+    "STREAMLIT_SERVER_HEADLESS": "true",
+    "STREAMLIT_SERVER_PORT": "8501",
+    "STREAMLIT_SERVER_ADDRESS": "0.0.0.0"
+  },
+  "functions": {
+    "api/[...].py": {
+      "runtime": "python3.11"
+    }
+  }
+}
