@@ -222,6 +222,8 @@ data/external/
 models/*.pkl
 models/*.joblib
 models/evaluation_report.json
+models/tuned_params.json
+models/thresholds.json
 
 # Keep the feature_columns.json since it's lightweight and useful for reference
 # models/feature_columns.json  <-- intentionally tracked

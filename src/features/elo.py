@@ -1,29 +1,33 @@
 import pandas as pd
 
+from src.utils.helpers import tournament_to_weight
+
+
 class EloSystem:
     def __init__(self, base_rating=1500, k_factor=32):
         self.ratings = {}
         self.base_rating = base_rating
         self.k_factor = k_factor
-        
+
     def get_rating(self, team):
         return self.ratings.get(team, self.base_rating)
-        
+
     def expected_result(self, rating_a, rating_b):
         return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
-        
-    def update_ratings(self, team_a, team_b, actual_result_a):
+
+    def update_ratings(self, team_a, team_b, actual_result_a, weight=1.0):
         rating_a = self.get_rating(team_a)
         rating_b = self.get_rating(team_b)
-        
+
         expected_a = self.expected_result(rating_a, rating_b)
         expected_b = 1 - expected_a
-        
+
         actual_result_b = 1 - actual_result_a
-        
-        new_rating_a = rating_a + self.k_factor * (actual_result_a - expected_a)
-        new_rating_b = rating_b + self.k_factor * (actual_result_b - expected_b)
-        
+
+        effective_k = self.k_factor * weight
+        new_rating_a = rating_a + effective_k * (actual_result_a - expected_a)
+        new_rating_b = rating_b + effective_k * (actual_result_b - expected_b)
+
         self.ratings[team_a] = new_rating_a
         self.ratings[team_b] = new_rating_b
 
@@ -55,7 +59,8 @@ def compute_elo_features(df: pd.DataFrame) -> pd.DataFrame:
         else:
             actual = 0
             
-        elo.update_ratings(home_team, away_team, actual)
+        weight = tournament_to_weight(row['tournament'])
+        elo.update_ratings(home_team, away_team, actual, weight=weight)
         
     df['home_elo_before'] = home_elo_before
     df['away_elo_before'] = away_elo_before

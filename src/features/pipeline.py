@@ -6,6 +6,7 @@ from src.data.cleaner import clean_and_prepare_matches
 from src.features.elo import compute_elo_features
 from src.features.form import compute_team_form
 from src.features.head_to_head import compute_h2h_features
+from src.features.streak import compute_streak_features
 
 def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
     print("Loading and cleaning data...")
@@ -19,7 +20,10 @@ def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
     
     print("Computing H2H features...")
     df = compute_h2h_features(df)
-    
+
+    print("Computing streak and rest features...")
+    df = compute_streak_features(df)
+
     # Process additional features
     df['neutral'] = df['neutral'].astype(int)
     
@@ -32,9 +36,14 @@ def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
         'home_elo_before', 'away_elo_before', 'elo_diff',
         'home_win_rate_5', 'home_win_rate_10', 'home_goals_scored_avg_5', 'home_goals_scored_avg_10',
         'home_goals_conceded_avg_5', 'home_goals_conceded_avg_10',
+        'home_goal_diff_avg_5', 'home_goal_diff_avg_10',
         'away_win_rate_5', 'away_win_rate_10', 'away_goals_scored_avg_5', 'away_goals_scored_avg_10',
         'away_goals_conceded_avg_5', 'away_goals_conceded_avg_10',
+        'away_goal_diff_avg_5', 'away_goal_diff_avg_10',
+        'home_advantage',
         'h2h_home_win_rate', 'h2h_avg_goal_diff', 'h2h_num_meetings',
+        'home_streak', 'away_streak',
+        'home_days_since_last', 'away_days_since_last',
         'outcome' # Target variable
     ]
     

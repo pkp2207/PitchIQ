@@ -7,8 +7,10 @@ from sklearn.metrics import (
     accuracy_score, f1_score, confusion_matrix, classification_report,
     log_loss, brier_score_loss,
 )
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.preprocessing import label_binarize
 from src.data.loader import get_project_root
+from src.models.threshold import apply_thresholds
 
 
 def evaluate_model():
@@ -37,16 +39,33 @@ def evaluate_model():
 
     model = joblib.load(model_path)
 
-    preds = model.predict(X_test)
+    # --- Raw (argmax) predictions ---
+    raw_preds = model.predict(X_test)
     probs = model.predict_proba(X_test)
     classes = model.classes_
 
-    acc = accuracy_score(y_test, preds)
-    f1_macro = f1_score(y_test, preds, average='macro')
-    cm = confusion_matrix(y_test, preds)
-    report = classification_report(y_test, preds, output_dict=True)
+    raw_acc = accuracy_score(y_test, raw_preds)
+    raw_f1 = f1_score(y_test, raw_preds, average='macro')
+    raw_cm = confusion_matrix(y_test, raw_preds)
+    raw_report = classification_report(y_test, raw_preds, output_dict=True)
 
-    # Probability calibration metrics
+    # --- Threshold-adjusted predictions ---
+    thresholds_path = root / "models" / "thresholds.json"
+    if thresholds_path.exists():
+        with open(thresholds_path, 'r') as f:
+            raw_thresh = json.load(f)
+        thresholds = {int(k): float(v) for k, v in raw_thresh.items()}
+    else:
+        thresholds = {-1: 1.0, 0: 1.0, 1: 1.0}
+
+    adj_probs, adj_preds = apply_thresholds(probs, thresholds, classes)
+
+    adj_acc = accuracy_score(y_test, adj_preds)
+    adj_f1 = f1_score(y_test, adj_preds, average='macro')
+    adj_cm = confusion_matrix(y_test, adj_preds)
+    adj_report = classification_report(y_test, adj_preds, output_dict=True)
+
+    # Probability calibration metrics (computed on raw probs, not adjusted)
     logloss = log_loss(y_test, probs, labels=classes)
 
     # Brier score: computed per-class then averaged (multiclass extension)
@@ -57,28 +76,88 @@ def evaluate_model():
         brier_per_class.append(bs)
     brier_avg = float(np.mean(brier_per_class))
 
+    # Detect whether the model is probability-calibrated
+    is_calibrated = isinstance(model, CalibratedClassifierCV)
+
+    # Reliability diagram data (per-class calibration curves)
+    reliability = {}
+    for i, cls in enumerate(classes):
+        try:
+            fraction_pos, mean_predicted = calibration_curve(
+                y_bin[:, i], probs[:, i], n_bins=10, strategy='uniform',
+            )
+            reliability[str(int(cls))] = {
+                'fraction_of_positives': fraction_pos.tolist(),
+                'mean_predicted_value': mean_predicted.tolist(),
+            }
+        except Exception:
+            # Not enough data in some bins — skip this class
+            pass
+
     results = {
-        'Accuracy': acc,
-        'Macro F1': f1_macro,
+        'Raw (argmax)': {
+            'Accuracy': raw_acc,
+            'Macro F1': raw_f1,
+            'Confusion Matrix': raw_cm.tolist(),
+            'Classification Report': raw_report,
+        },
+        'Threshold-adjusted': {
+            'Accuracy': adj_acc,
+            'Macro F1': adj_f1,
+            'Thresholds': {str(k): v for k, v in thresholds.items()},
+            'Confusion Matrix': adj_cm.tolist(),
+            'Classification Report': adj_report,
+        },
         'Log Loss': logloss,
         'Brier Score (avg)': brier_avg,
-        'Confusion Matrix': cm.tolist(),
-        'Classification Report': report,
+        'Calibrated': is_calibrated,
+        'Reliability Diagram': reliability,
     }
 
-    print("Evaluation Results on Test Set (Last 10% of time):")
-    print(f"  Accuracy:    {acc:.4f}")
-    print(f"  Macro F1:    {f1_macro:.4f}")
+    # --- Print results ---
+    print("=" * 60)
+    print("Evaluation Results on Test Set (Last 10% of time)")
+    print("=" * 60)
+
+    print("\n--- Raw predictions (argmax) ---")
+    print(f"  Accuracy:    {raw_acc:.4f}")
+    print(f"  Macro F1:    {raw_f1:.4f}")
+    print("  Confusion Matrix:")
+    print(f"  {raw_cm}")
+    print(f"  Per-class report:")
+    for cls_key in ['-1', '0', '1']:
+        if cls_key in raw_report:
+            r = raw_report[cls_key]
+            print(f"    Class {cls_key:>2}: precision={r['precision']:.3f}  "
+                  f"recall={r['recall']:.3f}  f1={r['f1-score']:.3f}")
+
+    print(f"\n--- Threshold-adjusted predictions ---")
+    print(f"  Thresholds:  { {int(k): round(v, 2) for k, v in thresholds.items()} }")
+    print(f"  Accuracy:    {adj_acc:.4f}")
+    print(f"  Macro F1:    {adj_f1:.4f}")
+    print("  Confusion Matrix:")
+    print(f"  {adj_cm}")
+    print(f"  Per-class report:")
+    for cls_key in ['-1', '0', '1']:
+        if cls_key in adj_report:
+            r = adj_report[cls_key]
+            print(f"    Class {cls_key:>2}: precision={r['precision']:.3f}  "
+                  f"recall={r['recall']:.3f}  f1={r['f1-score']:.3f}")
+
+    delta_f1 = adj_f1 - raw_f1
+    direction = "+" if delta_f1 >= 0 else ""
+    print(f"\n  Macro F1 change: {direction}{delta_f1:.4f}")
+
+    print(f"\n--- Calibration metrics ---")
     print(f"  Log Loss:    {logloss:.4f}")
     print(f"  Brier Score: {brier_avg:.4f}")
-    print("Confusion Matrix:")
-    print(cm)
+    print(f"  Calibrated:  {is_calibrated}")
 
     out_path = root / "models" / "evaluation_report.json"
     with open(out_path, 'w') as f:
         json.dump(results, f, indent=4)
 
-    print(f"Saved report to {out_path}")
+    print(f"\nSaved report to {out_path}")
 
 
 if __name__ == "__main__":

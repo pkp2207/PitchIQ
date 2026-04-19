@@ -3,22 +3,36 @@
 import re
 
 # Common aliases / misspellings -> canonical name
+# Canonical names should match the primary spelling used in the dataset.
 _TEAM_ALIASES = {
+    # United States variants
     "usa": "United States",
     "us": "United States",
     "united states of america": "United States",
+    # Korea
     "korea republic": "South Korea",
     "republic of korea": "South Korea",
+    # Iran
     "ir iran": "Iran",
+    # Ivory Coast
     "côte d'ivoire": "Ivory Coast",
     "cote d'ivoire": "Ivory Coast",
-    "dr congo": "Congo DR",
-    "congo dr": "Congo DR",
-    "czech republic": "Czechia",
-    "north macedonia": "North Macedonia",
+    # Congo DR — dataset uses "DR Congo" as the canonical name
+    "congo dr": "DR Congo",
+    # Czech Republic — dataset uses "Czech Republic" (not "Czechia")
+    "czechia": "Czech Republic",
+    # Macedonia
     "fyr macedonia": "North Macedonia",
-    "china pr": "China",
+    "macedonia": "North Macedonia",
+    # China — dataset uses "China PR"
+    "china": "China PR",
     "chinese taipei": "Taiwan",
+    # Eswatini — dataset uses "Eswatini" (formerly Swaziland)
+    "swaziland": "Eswatini",
+    # Myanmar — dataset uses "Myanmar" (formerly Burma)
+    "burma": "Myanmar",
+    # Timor-Leste
+    "east timor": "Timor-Leste",
 }
 
 # Tournament importance weights (higher = more important)

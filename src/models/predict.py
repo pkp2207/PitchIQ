@@ -11,6 +11,7 @@ except Exception:
     HAS_SHAP = False
 
 from src.data.loader import get_project_root
+from src.models.threshold import apply_thresholds
 
 
 class MatchPredictor:
@@ -26,6 +27,15 @@ class MatchPredictor:
         with open(self.features_path, 'r') as f:
             self.feature_cols = json.load(f)
 
+        # Load per-class decision thresholds (default to 1.0 if not present)
+        thresholds_path = self.root / "models" / "thresholds.json"
+        if thresholds_path.exists():
+            with open(thresholds_path, 'r') as f:
+                raw = json.load(f)
+            self.thresholds = {int(k): float(v) for k, v in raw.items()}
+        else:
+            self.thresholds = {-1: 1.0, 0: 1.0, 1: 1.0}
+
         # Load historical features for constructing prediction inputs
         self.features_data_path = self.root / "data" / "processed" / "features.csv"
         if self.features_data_path.exists():
@@ -39,14 +49,46 @@ class MatchPredictor:
             self._init_shap()
 
     def _get_underlying_model(self):
-        """Unwrap Pipeline or custom wrappers to get the raw estimator."""
+        """Unwrap Pipeline, CalibratedClassifierCV, SoftVotingEnsemble, or custom wrappers to get the raw estimator."""
         from sklearn.pipeline import Pipeline
+        from sklearn.calibration import CalibratedClassifierCV
+        from src.models.ensemble import SoftVotingEnsemble
         model = self.model
+
+        # Unwrap CalibratedClassifierCV first — it wraps another model
+        if isinstance(model, CalibratedClassifierCV):
+            # For a fitted CalibratedClassifierCV, the per-fold fitted
+            # estimators live in calibrated_classifiers_[i].estimator.
+            # Use the first fold's fitted estimator so that
+            # feature_importances_ / coef_ are available.
+            if hasattr(model, 'calibrated_classifiers_') and model.calibrated_classifiers_:
+                model = model.calibrated_classifiers_[0].estimator
+            else:
+                # Unfitted — fall back to the template estimator
+                model = model.estimator
+
+        # Unwrap SoftVotingEnsemble — extract first tree-based sub-model for SHAP,
+        # or fall back to the ensemble itself (which has feature_importances_).
+        if isinstance(model, SoftVotingEnsemble):
+            # Prefer a tree-based sub-model for SHAP compatibility
+            for sub_model in model.estimators_:
+                raw = sub_model
+                if hasattr(raw, 'xgb'):
+                    return raw.xgb
+                if hasattr(raw, 'feature_importances_'):
+                    return raw
+            # No tree-based model found — return ensemble itself
+            # (its feature_importances_ property will be used as fallback)
+            return model
+
+        # Unwrap Pipeline
         if isinstance(model, Pipeline):
-            return model.named_steps['clf']
+            model = model.named_steps['clf']
+
         # Our _XGBWrapper stores the real model in .xgb
         if hasattr(model, 'xgb'):
             return model.xgb
+
         return model
 
     def _init_shap(self):
@@ -173,28 +215,47 @@ class MatchPredictor:
 
         # For Pipeline models we need to transform X for SHAP but predict with the pipeline
         from sklearn.pipeline import Pipeline
-        if isinstance(self.model, Pipeline):
-            probs = self.model.predict_proba(X_pred)[0]
-            predicted_class = self.model.predict(X_pred)[0]
+        from sklearn.calibration import CalibratedClassifierCV
+        from src.models.ensemble import SoftVotingEnsemble
+
+        # Find the inner pipeline (if any) for SHAP data scaling
+        inner_model = self.model
+        if isinstance(inner_model, CalibratedClassifierCV):
+            if hasattr(inner_model, 'calibrated_classifiers_') and inner_model.calibrated_classifiers_:
+                inner_model = inner_model.calibrated_classifiers_[0].estimator
+            else:
+                inner_model = inner_model.estimator
+        # SoftVotingEnsemble doesn't wrap a Pipeline, so skip unwrapping
+        if isinstance(inner_model, SoftVotingEnsemble):
+            inner_model = None  # No scaling needed
+
+        raw_probs = self.model.predict_proba(X_pred)
+        classes = self.model.classes_
+
+        # Apply per-class threshold scaling to boost under-predicted classes
+        adjusted_probs, adjusted_preds = apply_thresholds(
+            raw_probs, self.thresholds, classes,
+        )
+        probs = adjusted_probs[0]
+        predicted_class = adjusted_preds[0]
+
+        if inner_model is not None and isinstance(inner_model, Pipeline):
             # SHAP needs the scaled data
             X_shap = pd.DataFrame(
-                self.model.named_steps['scaler'].transform(X_pred),
+                inner_model.named_steps['scaler'].transform(X_pred),
                 columns=self.feature_cols,
             )
         else:
-            probs = self.model.predict_proba(X_pred)[0]
-            predicted_class = self.model.predict(X_pred)[0]
             X_shap = X_pred
 
-        classes = self.model.classes_
         prob_dict = {}
         for cls, prob in zip(classes, probs):
             if cls == 1:
-                prob_dict['Win'] = prob
+                prob_dict['Win'] = float(prob)
             elif cls == 0:
-                prob_dict['Draw'] = prob
+                prob_dict['Draw'] = float(prob)
             elif cls == -1:
-                prob_dict['Loss'] = prob
+                prob_dict['Loss'] = float(prob)
 
         outcome_map = {1: 'Win', 0: 'Draw', -1: 'Loss'}
 

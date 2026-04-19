@@ -1,5 +1,7 @@
 # PitchIQ
+
 Football Outcome Intelligence System
+
 # FIFA World Cup Match Outcome Predictor
 
 A machine learning project that predicts the outcome of international football matches — Win, Loss, or Draw — using historical FIFA match data, statistical feature engineering, and interpretable classification models.
@@ -38,19 +40,28 @@ The predictor ingests over 150 years of international match records, engineers c
 
 **What this project achieves:**
 
-- A trained classification model that predicts match outcomes with probability scores
+- A trained classification model that predicts match outcomes with calibrated probability scores
 - A Streamlit web application that allows users to select two national teams and receive a prediction
-- Clear feature attribution explaining which factors drove the prediction
+- SHAP-based feature attribution explaining which factors drove each prediction
+- Optuna-powered hyperparameter tuning for optimal model selection
+- Probability calibration for reliable confidence estimates
 
 ---
 
 ## Features
 
 - **Match outcome prediction**: Classifies each match as a Win, Loss, or Draw from the perspective of the home team
-- **Probability outputs**: Returns confidence scores for all three outcome classes, not just a single label
-- **Feature-based explanation**: Surfaces the top contributing features for each prediction, making the model interpretable
-- **Modular pipeline**: Each stage — data cleaning, feature engineering, training, inference — is independently executable
-- **Interactive Streamlit interface**: Allows non-technical users to explore predictions through a browser-based UI
+- **Calibrated probability outputs**: Returns calibrated confidence scores for all three outcome classes via `CalibratedClassifierCV`
+- **SHAP-based explanation**: Surfaces the top contributing features for each prediction with signed SHAP values, color-coded in the UI (teal = pushes toward predicted outcome, orange = pushes against)
+- **Hyperparameter tuning**: Optuna-based search across all model types with temporal validation
+- **Per-class threshold tuning**: Grid search over per-class probability scaling factors to boost under-predicted classes (especially draws), maximizing macro F1
+- **Soft-voting ensemble**: Optional `--ensemble` mode that combines top-performing models via averaged probabilities, used when it beats or ties the best individual model
+- **Class imbalance handling**: Balanced class weights for LogisticRegression/RandomForest and balanced sample weights for GradientBoosting/HistGradientBoosting
+- **6 model candidates**: Logistic Regression, Random Forest, Gradient Boosting, HistGradientBoosting, XGBoost, and LightGBM (last two optional, require libomp)
+- **29 engineered features**: Elo ratings, rolling form (win rate, goals, goal difference), head-to-head records, win/loss streaks, days since last match, and home advantage
+- **Modular pipeline**: Each stage — data cleaning, feature engineering, tuning, training, inference — is independently executable
+- **Interactive Streamlit interface**: Allows non-technical users to explore predictions through a browser-based UI with prediction cards, SHAP charts, and head-to-head history tables
+- **Comprehensive test suite**: 47 pytest tests covering feature engineering (Elo, form, H2H, streaks, days-since-last), model predictions, ensemble behavior, and pipeline integration
 - **Player strength integration** *(Phase 2)*: Augments match-level features with squad-level market value and ratings from Transfermarkt
 - **Sentiment analysis** *(Phase 3, optional)*: Incorporates pre-match sentiment signals derived from news and social media using transformer-based NLP models
 
@@ -62,7 +73,7 @@ The predictor ingests over 150 years of international match records, engineers c
 
 **Source:** [Kaggle — International Football Results from 1872 to 2017](https://www.kaggle.com/datasets/martj42/international-football-results-from-1872-to-2017)
 
-This dataset contains the results of every recorded international men's football match since 1872. It is the foundational data source for the project.
+This dataset contains the results of every recorded international men's football match since 1872. It is the foundational data source for the project. A synthetic 500-row sample can be generated for development without Kaggle credentials.
 
 | Column | Description |
 |---|---|
@@ -104,7 +115,8 @@ Pre-match sentiment is derived from news headlines and social media commentary u
 ### 1. Data Cleaning
 
 - Filter out matches with missing scores, ambiguous team names, or corrupted entries
-- Standardize team name strings for consistent merging across datasets
+- Standardize team name strings for consistent merging across datasets (via `normalize_team_name()` helper)
+- Normalize the `neutral` column from various formats (TRUE/FALSE strings, booleans) to integer
 - Remove matches from before a chosen historical cutoff to reduce noise from sparse early records
 - Encode the target variable: Win = 1, Draw = 0, Loss = -1 (from the home team perspective)
 
@@ -114,23 +126,45 @@ Raw match records are transformed into a rich feature matrix capturing team form
 
 ### 3. Model Selection
 
-Multiple classification models are evaluated:
+Six classification models are evaluated on a temporal validation split:
 
-- **Logistic Regression** — establishes a probabilistic baseline and provides directly interpretable coefficients
-- **Random Forest Classifier** — captures non-linear feature interactions and provides feature importance rankings
-- **Gradient Boosting (XGBoost / LightGBM)** — typically achieves the strongest predictive performance through ensemble boosting
+- **Logistic Regression** (with StandardScaler) — establishes a probabilistic baseline with interpretable coefficients
+- **Random Forest Classifier** — captures non-linear feature interactions with feature importance rankings
+- **Gradient Boosting Classifier** — traditional sklearn gradient boosting ensemble
+- **HistGradientBoosting Classifier** — sklearn's histogram-based gradient boosting (similar to LightGBM, no native library dependencies)
+- **XGBoost** *(optional, requires libomp)* — high-performance gradient boosting with label mapping for non-negative labels
+- **LightGBM** *(optional, requires libomp)* — histogram-based gradient boosting from Microsoft
 
-The final model is selected based on cross-validated F1 score and calibration of predicted probabilities.
+The best model is selected based on macro F1 score on the temporal validation split. Optuna hyperparameter tuning is available via `--tune` to search optimal parameters for each model. With `--ensemble`, a soft-voting ensemble is built from all models scoring within 0.05 macro F1 of the best individual; the ensemble is used only if it beats or ties the best single model.
 
-### 4. Evaluation
+### 4. Probability Calibration
 
-Models are evaluated on a temporally held-out test set (matches from the most recent years) to simulate realistic out-of-sample performance. The following metrics are reported:
+The selected model is wrapped in `CalibratedClassifierCV` to produce well-calibrated probability estimates:
+- **Sigmoid (Platt scaling)** for smaller datasets (<500 samples)
+- **Isotonic regression** for larger datasets
+- Calibration can be skipped with `--no-calibrate`
 
-- **Accuracy** — overall fraction of correctly predicted outcomes
-- **Macro F1 Score** — accounts for class imbalance across Win, Draw, and Loss
-- **Confusion Matrix** — identifies systematic misclassifications between classes
+### 5. Per-Class Threshold Tuning
+
+After calibration, per-class decision thresholds are optimized on the validation set. Instead of using argmax on raw predicted probabilities, each class's probability is scaled by a learned factor before taking argmax. This allows the model to boost under-predicted classes (especially draws):
+
+- **Grid search** over scaling factors for each class: Loss and Win range [0.5, 1.5], Draw range [0.5, 3.0] (wider because draws are systematically under-predicted)
+- The optimal thresholds are saved to `models/thresholds.json` and loaded at inference time by both `predict.py` and `evaluate.py`
+- The evaluation report compares raw (argmax) vs. threshold-adjusted metrics side-by-side
+
+### 6. Evaluation
+
+Models are evaluated on a temporally held-out test set (last 10% of matches) to simulate realistic out-of-sample performance. The evaluation report includes both **raw (argmax)** and **threshold-adjusted** predictions:
+
+- **Accuracy** — overall fraction of correctly predicted outcomes (reported for both raw and threshold-adjusted)
+- **Macro F1 Score** — accounts for class imbalance across Win, Draw, and Loss (reported for both)
+- **Confusion Matrix** — identifies systematic misclassifications between classes (reported for both)
+- **Per-class Precision, Recall, F1** — detailed breakdown for each outcome class
+- **Macro F1 Delta** — the change in macro F1 from applying threshold tuning
 - **Brier Score** — measures calibration quality of predicted probabilities
 - **Log Loss** — penalizes overconfident incorrect predictions
+- **Reliability Diagram** — per-class calibration curve data (fraction of positives vs. mean predicted value)
+- **Calibration Status** — whether the model was probability-calibrated
 
 ---
 
@@ -139,24 +173,36 @@ Models are evaluated on a temporally held-out test set (matches from the most re
 Feature engineering is the most consequential stage of this pipeline. The following features are constructed for each match:
 
 **Recent Form**
-- Rolling win rate, draw rate, and loss rate over the last 5 and 10 matches for both home and away teams
+- Rolling win rate over the last 5 and 10 matches for both home and away teams
 - Average goals scored and conceded over the same rolling windows
-- Momentum indicators based on whether the team is on a winning or losing streak
+- Average goal difference over the last 5 and 10 matches (`goal_diff_avg_5`, `goal_diff_avg_10`)
+- Uses `shift(1).rolling()` to strictly avoid data leakage (only past matches used)
+
+**Momentum and Rest**
+- Win/loss streak: positive values indicate consecutive wins, negative values indicate consecutive losses, 0 indicates the last result was a draw
+- Days since last match: calendar days since the team last played any match (home or away), default 30 for a team's first match
+- Iterates chronologically over a stacked team-level view for correct tracking regardless of home/away role
+
+**Home Advantage**
+- Rolling win rate over the team's last 10 home matches (`home_advantage`)
+- Only considers matches where the team was the home side
+- Captures venue-specific performance trends beyond the binary neutral flag
 
 **Head-to-Head Record**
 - Historical win rate of the home team in direct matchups against the away team
 - Average goal difference in previous encounters
 - Number of prior meetings (used as a confidence weight)
+- Uses `tuple(sorted([home, away]))` as a symmetric matchup key
 
 **Ranking and Prestige**
-- FIFA ranking differential at the time of the match (where available)
-- Proxy ranking based on Elo ratings, constructed from the historical match record
-- Elo rating gap between home and away team prior to kickoff
+- Elo ratings constructed from the historical match record (base 1500, K=32)
+- Elo rating gap between home and away team prior to kickoff (`elo_diff`)
+- Ratings updated after each match chronologically
 
 **Venue and Context**
 - Whether the match is played at a neutral venue
-- Tournament type encoded as an ordinal feature (Friendlies carry less signal than competitive fixtures)
-- Home advantage indicator (non-neutral ground matches)
+- Tournament type encoded as a binary feature (`is_friendly`)
+- Tournament importance weights available via `tournament_to_weight()` helper
 
 **Squad Strength** *(Phase 2)*
 - Aggregate market value of the starting squad derived from Transfermarkt data
@@ -171,66 +217,76 @@ Feature engineering is the most consequential stage of this pipeline. The follow
 
 ## Model Performance
 
-Model evaluation is conducted on a temporally stratified held-out test set. The following metrics are tracked and reported in the `notebooks/04_model_evaluation.ipynb` notebook:
+Model evaluation is conducted on a temporally stratified held-out test set. Results are saved to `models/evaluation_report.json` and include:
 
 - Accuracy across Win, Draw, and Loss classes
 - Per-class Precision, Recall, and F1 Score
-- Macro-averaged and weighted F1 Score
-- Confusion Matrix visualization
-- Probability calibration curve (reliability diagram)
-- Feature importance ranking (for tree-based models)
+- Macro-averaged F1 Score
+- Confusion Matrix
+- Log Loss and Brier Score
+- Probability calibration status and reliability diagram data
+- SHAP-based feature importance ranking
 
-Note: No performance numbers are hardcoded in this README. Actual results depend on the chosen historical cutoff, feature set, and hyperparameter configuration. Refer to the evaluation notebook for reported metrics.
+Note: No performance numbers are hardcoded in this README. Actual results depend on the chosen historical cutoff, feature set, and hyperparameter configuration. Run `python -m src.models.evaluate` to see current metrics.
 
 ---
 
 ## Project Structure
 
 ```
-fifa-match-predictor/
+PitchIQ/
 │
 ├── data/
 │   ├── raw/                    # Original downloaded datasets (not committed to Git)
-│   ├── processed/              # Cleaned and feature-engineered datasets
-│   └── external/               # Supplementary data (Transfermarkt, rankings)
+│   └── processed/              # Cleaned and feature-engineered datasets
 │
-├── notebooks/
-│   ├── 01_data_exploration.ipynb
-│   ├── 02_feature_engineering.ipynb
-│   ├── 03_model_training.ipynb
-│   └── 04_model_evaluation.ipynb
+├── scripts/
+│   ├── generate_sample_data.py # Generate synthetic 500-row dataset for development
+│   └── download_data.py        # Download real datasets from Kaggle
 │
 ├── src/
 │   ├── data/
-│   │   ├── loader.py           # Data loading utilities
-│   │   └── cleaner.py          # Data cleaning functions
+│   │   ├── loader.py           # Data loading utilities and get_project_root()
+│   │   └── cleaner.py          # Data cleaning and target encoding
 │   ├── features/
-│   │   ├── form.py             # Rolling form feature computation
-│   │   ├── head_to_head.py     # Head-to-head statistics
+│   │   ├── pipeline.py         # Feature pipeline orchestrator (Elo -> Form -> H2H -> Streak)
 │   │   ├── elo.py              # Elo rating computation
-│   │   └── squad_strength.py   # Transfermarkt integration (Phase 2)
+│   │   ├── form.py             # Rolling form, goal diff avg, and home advantage
+│   │   ├── head_to_head.py     # Head-to-head statistics
+│   │   └── streak.py           # Win/loss streaks and days-since-last-match
 │   ├── models/
-│   │   ├── train.py            # Model training and cross-validation
-│   │   ├── predict.py          # Inference utilities
-│   │   └── evaluate.py         # Evaluation metric computation
+│   │   ├── train.py            # Model training, selection, calibration, and threshold optimization
+│   │   ├── tune.py             # Optuna hyperparameter tuning
+│   │   ├── threshold.py        # Per-class decision threshold tuning
+│   │   ├── ensemble.py         # Soft-voting ensemble of top models
+│   │   ├── predict.py          # Inference with SHAP explanations and threshold application
+│   │   └── evaluate.py         # Evaluation metrics (raw vs threshold-adjusted)
 │   └── utils/
-│       └── helpers.py          # Shared utility functions
+│       └── helpers.py          # Team name normalization, tournament weights
 │
 ├── app/
 │   ├── streamlit_app.py        # Main Streamlit application
-│   ├── components/             # UI component modules
+│   ├── components/
+│   │   ├── prediction_card.py  # Outcome badge + probability bar
+│   │   ├── feature_attribution.py # SHAP value horizontal bar chart
+│   │   └── h2h_table.py        # Head-to-head history table
 │   └── assets/                 # Static assets (logos, CSS)
 │
 ├── models/
-│   ├── best_model.pkl          # Serialized trained model
-│   └── feature_columns.json    # Feature schema for inference alignment
+│   ├── best_model.pkl          # Serialized trained model (gitignored)
+│   ├── feature_columns.json    # Feature schema for inference alignment
+│   ├── thresholds.json         # Per-class decision thresholds (gitignored)
+│   ├── evaluation_report.json  # Latest evaluation metrics (gitignored)
+│   └── tuned_params.json       # Optuna tuning results (gitignored)
 │
 ├── tests/
-│   ├── test_features.py
-│   └── test_models.py
+│   ├── conftest.py             # Shared test fixtures (20-match sample)
+│   ├── test_features.py        # Tests for Elo, form, H2H, streak, and days-since-last features (27 tests)
+│   └── test_models.py          # Tests for predictor API, ensemble behavior, and pipeline integration (20 tests)
 │
+├── pyproject.toml              # Project config, editable install, pytest config
 ├── requirements.txt
-├── .gitignore
+├── CLAUDE.md
 └── README.md
 ```
 
@@ -240,15 +296,15 @@ fifa-match-predictor/
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.10 or higher
 - pip
 - Git
 
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/your-username/fifa-match-predictor.git
-cd fifa-match-predictor
+git clone https://github.com/your-username/PitchIQ.git
+cd PitchIQ
 ```
 
 ### Step 2: Create a Virtual Environment
@@ -258,38 +314,47 @@ python -m venv venv
 source venv/bin/activate        # On Windows: venv\Scripts\activate
 ```
 
-### Step 3: Install Dependencies
+### Step 3: Install the Project
+
+```bash
+pip install -e .
+```
+
+This installs the project in editable mode with all dependencies. Alternatively:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 4: Download the Datasets
+### Step 4: Get the Data
 
-Download the following datasets from Kaggle and place them in the `data/raw/` directory:
-
-- [International Football Results](https://www.kaggle.com/datasets/martj42/international-football-results-from-1872-to-2017) — save as `data/raw/results.csv`
-- [Transfermarkt Player Scores](https://www.kaggle.com/datasets/davidcariboo/player-scores) — save as `data/raw/players.csv`
-
-You will need a Kaggle account and the [Kaggle API](https://github.com/Kaggle/kaggle-api) configured to download via CLI:
+**Option A: Generate synthetic sample data (quick start, no credentials needed):**
 
 ```bash
-kaggle datasets download -d martj42/international-football-results-from-1872-to-2017 -p data/raw/ --unzip
-kaggle datasets download -d davidcariboo/player-scores -p data/raw/ --unzip
+python scripts/generate_sample_data.py
 ```
 
-### Step 5: Run the Data Pipeline
+**Option B: Download real Kaggle datasets (~45k matches):**
 
 ```bash
-python src/data/cleaner.py
-python src/features/form.py
-python src/features/elo.py
+python scripts/download_data.py
 ```
 
-### Step 6: Train the Model
+Requires a Kaggle account and [API credentials](https://github.com/Kaggle/kaggle-api#api-credentials).
+
+### Step 5: Run the Pipeline
 
 ```bash
-python src/models/train.py
+python -m src.data.cleaner              # Clean raw data
+python -m src.features.pipeline         # Feature engineering
+python -m src.models.train              # Train and select best model
+python -m src.models.evaluate           # Evaluate on holdout set
+```
+
+### Step 6: Run Tests
+
+```bash
+pytest tests/ -v
 ```
 
 ### Step 7: Launch the Streamlit App
@@ -310,38 +375,61 @@ The application will open in your browser at `http://localhost:8501`.
 2. Select the **Home Team** from the dropdown menu.
 3. Select the **Away Team** from the second dropdown.
 4. Optionally specify the **Tournament Type** (e.g., World Cup, Friendly) to contextualize the prediction.
-5. Click **Predict**.
+5. Click **Predict Outcome**.
 
-**Example Output:**
+The app displays:
+- A colored outcome badge (green=Win, yellow=Draw, red=Loss) with a stacked probability bar
+- A SHAP feature attribution chart showing which factors drove the prediction
+- A head-to-head history table with win/draw/loss tallies
 
-```
-Home Team: Brazil
-Away Team: Argentina
-Tournament: FIFA World Cup
-
-Predicted Outcome: Win (Home)
-
-Probabilities:
-  Win  (Brazil):    62.4%
-  Draw:             21.1%
-  Loss (Brazil):    16.5%
-
-Top Contributing Features:
-  1. Elo Rating Differential:         +0.38
-  2. Home Team Recent Win Rate (5):   +0.27
-  3. Head-to-Head Win Rate:           +0.19
-  4. Neutral Venue:                   -0.08
-  5. Away Team Recent Form (10):      -0.06
-```
-
-Note: The probability values shown above are illustrative examples for documentation purposes only. Actual model outputs will vary based on the training data and configuration.
-
-### Running Notebooks
-
-Notebooks are intended to be run sequentially:
+### Training with Hyperparameter Tuning
 
 ```bash
-jupyter notebook notebooks/01_data_exploration.ipynb
+# Tune all models with Optuna (30 trials each), then train the best
+python -m src.models.train --tune
+
+# Tune with more trials
+python -m src.models.train --tune --tune-trials 50
+
+# Reuse previously saved tuned parameters
+python -m src.models.train --params models/tuned_params.json
+
+# Train without probability calibration
+python -m src.models.train --no-calibrate
+```
+
+### Ensemble Training
+
+```bash
+# Build a soft-voting ensemble from top models
+python -m src.models.train --ensemble
+
+# Combine tuning with ensemble selection
+python -m src.models.train --tune --ensemble
+
+# Ensemble uses all models within 0.05 macro F1 of the best individual.
+# The ensemble is kept only if it beats or ties the best single model.
+# Probability calibration is skipped for ensembles (probability averaging
+# across diverse model types is self-calibrating).
+```
+
+### Standalone Tuning
+
+```bash
+# Tune all models and save results
+python -m src.models.tune --save
+
+# Tune a specific model
+python -m src.models.tune --model HistGradientBoosting --n-trials 50
+```
+
+### Threshold Tuning
+
+Per-class decision thresholds are automatically optimized during training. The thresholds are saved to `models/thresholds.json` and applied at inference time. To see the impact of threshold tuning, run:
+
+```bash
+python -m src.models.evaluate
+# Output includes both raw (argmax) and threshold-adjusted metrics side-by-side
 ```
 
 ---
@@ -350,12 +438,12 @@ jupyter notebook notebooks/01_data_exploration.ipynb
 
 *Screenshots and a live demo link will be added once the Streamlit application is deployed.*
 
-**Planned UI sections:**
+**UI sections:**
 
-- Team selection interface with national team flags
-- Probability output displayed as a horizontal bar chart
-- Feature attribution panel showing SHAP values or coefficient contributions
-- Historical head-to-head summary table
+- Team selection interface with dropdown menus
+- Probability output displayed as a horizontal stacked bar chart (green/yellow/red)
+- SHAP feature attribution panel with horizontal bar chart (teal/orange)
+- Historical head-to-head summary table with win/draw/loss metrics
 
 ---
 
@@ -366,7 +454,7 @@ jupyter notebook notebooks/01_data_exploration.ipynb
 - **Real-time predictions**: Connect to a live football data API to enable predictions for upcoming scheduled fixtures
 - **REST API deployment**: Wrap the inference pipeline in a FastAPI service and deploy to a cloud platform (e.g., AWS, Render, Railway)
 - **Temporal model updating**: Implement an online learning or periodic retraining schedule to incorporate the most recent match results automatically
-- **Explainability dashboard**: Integrate SHAP-based explanations more deeply into the Streamlit UI for interactive feature attribution
+- **CI/CD pipeline**: GitHub Actions workflow to run `generate_sample_data -> pipeline -> pytest` on every push
 - **Multi-label confidence intervals**: Report uncertainty bounds on predicted probabilities to communicate model confidence
 
 ---
@@ -379,7 +467,9 @@ This project reinforced several principles that apply broadly across applied mac
 
 **Temporal validation is non-negotiable in time-series settings.** Using a random train-test split on match data would artificially inflate performance metrics by allowing the model to train on future information. A temporal cutoff — where the test set consists exclusively of the most recent matches — produces a far more realistic and honest evaluation.
 
-**Interpretability builds trust.** A model that returns "Brazil wins, 62% confidence" is far more useful than a black-box prediction when the user can also see that the Elo rating gap and recent form were the primary drivers. Feature attribution is not optional for a sports prediction system — it is the product.
+**Interpretability builds trust.** A model that returns "Brazil wins, 62% confidence" is far more useful than a black-box prediction when the user can also see that the Elo rating gap and recent form were the primary drivers. SHAP-based feature attribution is not optional for a sports prediction system — it is the product.
+
+**Probability calibration matters.** Raw model probabilities are often poorly calibrated. Wrapping models in `CalibratedClassifierCV` with isotonic or sigmoid calibration produces more reliable confidence estimates that users can trust.
 
 **Draws are the hardest class to predict.** Class imbalance is severe for Draw outcomes. Addressing this through class weighting, oversampling, or threshold tuning is essential to avoid a model that effectively ignores draws entirely.
 

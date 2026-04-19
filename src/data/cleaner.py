@@ -2,13 +2,18 @@ import os
 import pandas as pd
 from pathlib import Path
 from src.data.loader import load_results, get_project_root
+from src.utils.helpers import normalize_team_name
 
 def clean_and_prepare_matches(cutoff_year: int = 1990) -> pd.DataFrame:
     """
     Cleans the raw match dataset and prepares it for feature engineering.
     """
     df = load_results()
-    
+
+    # Normalize team names before any filtering or feature engineering
+    df['home_team'] = df['home_team'].map(normalize_team_name)
+    df['away_team'] = df['away_team'].map(normalize_team_name)
+
     # Filter by cutoff year
     df = df[df['date'].dt.year >= cutoff_year].copy()
     
