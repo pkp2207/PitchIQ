@@ -17,6 +17,7 @@ from sklearn.metrics import f1_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
+from sklearn.base import clone, BaseEstimator
 try:
     from xgboost import XGBClassifier
     HAS_XGB = True
@@ -58,12 +59,30 @@ def _decode_labels(y_encoded):
     return np.array([ENCODED_TO_LABEL[v] for v in y_encoded])
 
 
-class _XGBWrapper:
-    """Wraps XGBClassifier to handle label mapping transparently."""
+class _XGBWrapper(BaseEstimator):
+    """Wraps XGBClassifier to handle label mapping transparently.
+
+    Inherits from BaseEstimator and implements get_params/set_params
+    so sklearn.base.clone() can create unfitted copies with the same
+    hyperparameters.
+    """
 
     def __init__(self, **kwargs):
+        # Store each kwarg as an individual attribute so that get_params()
+        # can discover them and clone() can reconstruct the object.
+        for key, value in kwargs.items():
+            setattr(self, key, value)
         self.xgb = XGBClassifier(**kwargs)
         self.classes_ = np.array([-1, 0, 1])
+
+    def get_params(self, deep=True):
+        return self.xgb.get_params(deep=deep)
+
+    def set_params(self, **params):
+        self.xgb.set_params(**params)
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
 
     def fit(self, X, y, sample_weight=None):
         self.xgb.fit(X, _encode_labels(y), sample_weight=sample_weight)
@@ -170,6 +189,7 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
 
     print(f"Training set: {len(X_train)} samples")
     print(f"Test set: {len(X_test)} samples")
+    print(f"  (Sub-train / Validation / Threshold: see split below)")
 
     # Determine model set: tuned params, loaded params, or defaults
     if tune:
@@ -208,10 +228,18 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
     best_score = -1
     best_model = None
 
-    # Evaluate models on validation set (simple time split within train set)
-    val_split_idx = int(len(X_train) * 0.8)
-    X_t, X_v = X_train.iloc[:val_split_idx], X_train.iloc[val_split_idx:]
-    y_t, y_v = y_train.iloc[:val_split_idx], y_train.iloc[val_split_idx:]
+    # Evaluate models on validation set (three-way temporal split within train set)
+    # 70% sub-train / 15% validation (model selection) / 15% threshold tuning
+    val_split_idx = int(len(X_train) * 0.70)
+    thresh_split_idx = int(len(X_train) * 0.85)
+    X_t, X_v, X_thresh = (X_train.iloc[:val_split_idx],
+                           X_train.iloc[val_split_idx:thresh_split_idx],
+                           X_train.iloc[thresh_split_idx:])
+    y_t, y_v, y_thresh = (y_train.iloc[:val_split_idx],
+                           y_train.iloc[val_split_idx:thresh_split_idx],
+                           y_train.iloc[thresh_split_idx:])
+
+    print(f"  Sub-train: {len(X_t)} / Validation: {len(X_v)} / Threshold: {len(X_thresh)}")
 
     # Precompute sample weights for classes that need them
     sw_t = _compute_sample_weights(y_t)
@@ -254,10 +282,8 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
             # to get fresh fitted instances for the ensemble
             ensemble_estimators = []
             for name in top_model_names:
-                # Build a fresh instance with the same config
-                fresh_model = _default_models().get(name)
-                if fresh_model is None:
-                    continue
+                # Build a fresh (unfitted) copy preserving tuned hyperparameters
+                fresh_model = clone(models[name])
                 if name in SAMPLE_WEIGHT_MODELS:
                     fresh_model.fit(X_t, y_t, sample_weight=sw_t)
                 else:
@@ -294,9 +320,7 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
         # Retrain each sub-model on the full training data
         retrained_estimators = []
         for name, _ in best_model.estimators:
-            fresh = _default_models().get(name)
-            if fresh is None:
-                continue
+            fresh = clone(models[name])
             if name in SAMPLE_WEIGHT_MODELS:
                 fresh.fit(X_train, y_train, sample_weight=sw_train)
             else:
@@ -341,15 +365,15 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
         print("Skipping probability calibration (--no-calibrate).")
 
     # --- Per-class threshold optimization ---
-    # Use the validation split (X_v, y_v) to find thresholds that maximize macro F1.
-    # We re-fit the validation split from the *full* training data so thresholds
-    # are tuned against data the calibrated model was trained on but held out.
-    print("\nOptimizing per-class decision thresholds on validation set...")
-    best_thresholds, threshold_f1 = optimize_thresholds(best_model, X_v, y_v)
+    # Use the held-out threshold split (X_thresh, y_thresh) to find thresholds that
+    # maximize macro F1. This avoids double-dipping on the validation set used for
+    # model selection.
+    print("\nOptimizing per-class decision thresholds on threshold-tuning set...")
+    best_thresholds, threshold_f1 = optimize_thresholds(best_model, X_thresh, y_thresh)
 
-    baseline_preds = best_model.predict(X_v)
+    baseline_preds = best_model.predict(X_thresh)
     from sklearn.metrics import f1_score as _f1
-    baseline_f1 = _f1(y_v, baseline_preds, average='macro')
+    baseline_f1 = _f1(y_thresh, baseline_preds, average='macro')
     print(f"  Baseline macro F1 (argmax):      {baseline_f1:.4f}")
     print(f"  Threshold-tuned macro F1:         {threshold_f1:.4f}")
     print(f"  Optimal thresholds: { {int(k): round(v, 2) for k, v in best_thresholds.items()} }")

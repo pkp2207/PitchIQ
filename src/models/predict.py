@@ -158,18 +158,65 @@ class MatchPredictor:
                 })
         return top_features
 
+    def _get_latest_team_stats(self, team: str) -> dict:
+        """Get the latest known feature values for a team from any match they played.
+
+        Scans the features dataframe for the most recent row where the team
+        appeared as either home_team or away_team, then extracts feature values
+        with canonical (unprefixed) keys.
+        """
+        if self.df_features is None:
+            return {}
+
+        # Find the most recent match this team played in ANY role
+        mask = (self.df_features['home_team'] == team) | (self.df_features['away_team'] == team)
+        team_rows = self.df_features[mask]
+        if len(team_rows) == 0:
+            return {}
+
+        latest = team_rows.iloc[-1]
+        was_home = (latest['home_team'] == team)
+        prefix = 'home_' if was_home else 'away_'
+
+        stats = {}
+        # Elo
+        stats['elo'] = latest[f'{prefix}elo_before']
+
+        # Form features (win_rate, goals_scored_avg, goals_conceded_avg, goal_diff_avg)
+        for window in [5, 10]:
+            for feat in ['win_rate', 'goals_scored_avg', 'goals_conceded_avg', 'goal_diff_avg']:
+                key = f'{feat}_{window}'
+                stats[key] = latest.get(f'{prefix}{key}', 0)
+
+        # Streak and rest
+        stats['streak'] = latest.get(f'{prefix}streak', 0)
+        stats['days_since_last'] = latest.get(f'{prefix}days_since_last', 30)
+
+        # Squad strength
+        stats['squad_value'] = latest.get(f'{prefix}squad_value', 0)
+        stats['avg_age'] = latest.get(f'{prefix}avg_age', 0)
+
+        # Sentiment
+        stats['sentiment_avg'] = latest.get(f'{prefix}sentiment_avg', 0)
+        stats['sentiment_volume'] = latest.get(f'{prefix}sentiment_volume', 0)
+
+        # Home advantage — only from rows where team was home
+        home_rows = self.df_features[self.df_features['home_team'] == team]
+        if len(home_rows) > 0:
+            stats['home_advantage'] = home_rows.iloc[-1].get('home_advantage', 0)
+        else:
+            stats['home_advantage'] = 0
+
+        return stats
+
     def predict_match(self, home_team: str, away_team: str,
                       tournament_type: str = "Friendly", date: str = None):
         if self.df_features is None:
             raise ValueError("Features data not found. Run feature pipeline.")
 
-        # Extract latest stats for home team
-        home_rows = self.df_features[self.df_features['home_team'] == home_team]
-        home_stats = home_rows.iloc[-1] if len(home_rows) > 0 else None
-
-        # Extract latest stats for away team
-        away_rows = self.df_features[self.df_features['away_team'] == away_team]
-        away_stats = away_rows.iloc[-1] if len(away_rows) > 0 else None
+        # Get latest stats for each team from their most recent appearance
+        home_stats = self._get_latest_team_stats(home_team)
+        away_stats = self._get_latest_team_stats(away_team)
 
         # Extract H2H stats
         h2h_matches = self.df_features[
@@ -185,23 +232,26 @@ class MatchPredictor:
                 match_features[col] = 0
             elif col == 'is_friendly':
                 match_features[col] = 1 if tournament_type == 'Friendly' else 0
-            elif col.startswith('home_') and not col.startswith('home_elo'):
-                match_features[col] = home_stats[col] if home_stats is not None else 0
-            elif col.startswith('away_') and not col.startswith('away_elo'):
-                match_features[col] = away_stats[col] if away_stats is not None else 0
             elif col == 'home_elo_before':
-                match_features[col] = home_stats['home_elo_before'] if home_stats is not None else 1500
+                match_features[col] = home_stats.get('elo', 1500)
             elif col == 'away_elo_before':
-                match_features[col] = away_stats['away_elo_before'] if away_stats is not None else 1500
+                match_features[col] = away_stats.get('elo', 1500)
             elif col == 'elo_diff':
-                match_features[col] = match_features.get('home_elo_before', 1500) - match_features.get('away_elo_before', 1500)
+                match_features[col] = home_stats.get('elo', 1500) - away_stats.get('elo', 1500)
+            elif col == 'home_advantage':
+                match_features[col] = home_stats.get('home_advantage', 0)
             elif col == 'squad_value_diff':
-                match_features[col] = match_features.get('home_squad_value', 0) - match_features.get('away_squad_value', 0)
+                match_features[col] = home_stats.get('squad_value', 0) - away_stats.get('squad_value', 0)
             elif col == 'sentiment_diff':
-                match_features[col] = match_features.get('home_sentiment_avg', 0) - match_features.get('away_sentiment_avg', 0)
-            elif col in ('home_sentiment_volume', 'away_sentiment_volume'):
-                # Volume defaults to 0 (no sentiment data at inference time)
-                match_features[col] = 0
+                match_features[col] = home_stats.get('sentiment_avg', 0) - away_stats.get('sentiment_avg', 0)
+            elif col.startswith('home_'):
+                # Map home_win_rate_5 -> win_rate_5 in home_stats
+                suffix = col[len('home_'):]
+                match_features[col] = home_stats.get(suffix, 0)
+            elif col.startswith('away_'):
+                # Map away_win_rate_5 -> win_rate_5 in away_stats
+                suffix = col[len('away_'):]
+                match_features[col] = away_stats.get(suffix, 0)
             elif col.startswith('h2h_'):
                 if latest_h2h is not None:
                     if latest_h2h['home_team'] == home_team:
