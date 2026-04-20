@@ -1,3 +1,4 @@
+import logging
 import os
 import pandas as pd
 from pathlib import Path
@@ -10,30 +11,32 @@ from src.features.streak import compute_streak_features
 from src.features.squad_strength import compute_squad_features
 from src.features.sentiment import compute_sentiment_features
 
+logger = logging.getLogger(__name__)
+
 def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
-    print("Loading and cleaning data...")
+    logger.info("Loading and cleaning data...")
     df = clean_and_prepare_matches(cutoff_year)
-    
-    print("Computing Elo features...")
+
+    logger.info("Computing Elo features...")
     df = compute_elo_features(df)
-    
-    print("Computing form features...")
+
+    logger.info("Computing form features...")
     df = compute_team_form(df)
-    
-    print("Computing H2H features...")
+
+    logger.info("Computing H2H features...")
     df = compute_h2h_features(df)
 
-    print("Computing streak and rest features...")
+    logger.info("Computing streak and rest features...")
     df = compute_streak_features(df)
 
     # Phase 2: Squad strength features from Transfermarkt player data
     try:
         players_df = load_players()
-        print("Computing squad strength features...")
+        logger.info("Computing squad strength features...")
         df = compute_squad_features(df, players_df)
     except FileNotFoundError:
-        print("WARNING: Player data not found — skipping squad strength features.")
-        print("  Run: python scripts/generate_sample_players.py")
+        logger.warning("Player data not found — skipping squad strength features. "
+                       "Run: python scripts/generate_sample_players.py")
         # Add placeholder columns so the rest of the pipeline doesn't break
         df['home_squad_value'] = 0.0
         df['away_squad_value'] = 0.0
@@ -44,11 +47,11 @@ def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
     # Phase 3: Sentiment features from news/social media data
     try:
         sentiment_df = load_sentiment()
-        print("Computing sentiment features...")
+        logger.info("Computing sentiment features...")
         df = compute_sentiment_features(df, sentiment_df)
     except FileNotFoundError:
-        print("WARNING: Sentiment data not found — skipping sentiment features.")
-        print("  Run: python scripts/generate_sample_sentiment.py")
+        logger.warning("Sentiment data not found — skipping sentiment features. "
+                       "Run: python scripts/generate_sample_sentiment.py")
         # Add placeholder columns so the rest of the pipeline doesn't break
         df['home_sentiment_avg'] = 0.0
         df['away_sentiment_avg'] = 0.0
@@ -90,12 +93,17 @@ def run_feature_pipeline(cutoff_year: int = 1990) -> pd.DataFrame:
     return df_features
 
 if __name__ == "__main__":
-    print("Running feature engineering pipeline...")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logger.info("Running feature engineering pipeline...")
     df_features = run_feature_pipeline(cutoff_year=1990)
-    
+
     out_dir = get_project_root() / "data" / "processed"
     os.makedirs(out_dir, exist_ok=True)
     out_path = out_dir / "features.csv"
-    
+
     df_features.to_csv(out_path, index=False)
-    print(f"Saved features to {out_path} ({len(df_features)} matches)")
+    logger.info(f"Saved features to {out_path} ({len(df_features)} matches)")

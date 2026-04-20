@@ -1,7 +1,9 @@
+import argparse
+import json
+import logging
 import os
 import sys
-import json
-import argparse
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -14,6 +16,7 @@ from sklearn.ensemble import (
 )
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import f1_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
@@ -33,6 +36,8 @@ except Exception:
 from src.data.loader import get_project_root
 from src.models.ensemble import SoftVotingEnsemble
 from src.models.threshold import optimize_thresholds
+
+logger = logging.getLogger(__name__)
 
 # Models that don't support class_weight in the constructor and need
 # sample_weight passed to .fit() instead.
@@ -187,13 +192,13 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-    print(f"Training set: {len(X_train)} samples")
-    print(f"Test set: {len(X_test)} samples")
-    print(f"  (Sub-train / Validation / Threshold: see split below)")
+    logger.info(f"Training set: {len(X_train)} samples")
+    logger.info(f"Test set: {len(X_test)} samples")
+    logger.info(f"  (Time-series CV / Threshold: see split below)")
 
     # Determine model set: tuned params, loaded params, or defaults
     if tune:
-        print(f"\nRunning Optuna hyperparameter tuning ({tune_trials} trials per model)...")
+        logger.info(f"Running Optuna hyperparameter tuning ({tune_trials} trials per model)...")
         from src.models.tune import tune_all
         tuning_results = tune_all(n_trials=tune_trials)
 
@@ -201,7 +206,7 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
         tuned_path = root / "models" / "tuned_params.json"
         with open(tuned_path, "w") as f:
             json.dump(tuning_results, f, indent=2)
-        print(f"Saved tuning results to {tuned_path}")
+        logger.info(f"Saved tuning results to {tuned_path}")
 
         # Build models from tuned params
         models = {}
@@ -214,7 +219,7 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
         # Load previously saved tuned params
         with open(params_path) as f:
             tuning_results = json.load(f)
-        print(f"\nLoading tuned params from {params_path}")
+        logger.info(f"Loading tuned params from {params_path}")
         models = {}
         for r in tuning_results:
             try:
@@ -228,36 +233,47 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
     best_score = -1
     best_model = None
 
-    # Evaluate models on validation set (three-way temporal split within train set)
-    # 70% sub-train / 15% validation (model selection) / 15% threshold tuning
-    val_split_idx = int(len(X_train) * 0.70)
+    # Reserve last 15% of training data for threshold tuning (untouched during model selection)
     thresh_split_idx = int(len(X_train) * 0.85)
-    X_t, X_v, X_thresh = (X_train.iloc[:val_split_idx],
-                           X_train.iloc[val_split_idx:thresh_split_idx],
-                           X_train.iloc[thresh_split_idx:])
-    y_t, y_v, y_thresh = (y_train.iloc[:val_split_idx],
-                           y_train.iloc[val_split_idx:thresh_split_idx],
-                           y_train.iloc[thresh_split_idx:])
+    X_train_cv = X_train.iloc[:thresh_split_idx]
+    y_train_cv = y_train.iloc[:thresh_split_idx]
+    X_thresh = X_train.iloc[thresh_split_idx:]
+    y_thresh = y_train.iloc[thresh_split_idx:]
 
-    print(f"  Sub-train: {len(X_t)} / Validation: {len(X_v)} / Threshold: {len(X_thresh)}")
+    # Time-series cross-validation for model selection (expanding window, 3 folds)
+    tscv = TimeSeriesSplit(n_splits=3)
 
-    # Precompute sample weights for classes that need them
-    sw_t = _compute_sample_weights(y_t)
+    logger.info(f"  CV portion: {len(X_train_cv)} / Threshold: {len(X_thresh)}")
+    logger.info(f"  Time-series CV: {tscv.n_splits} folds (expanding window)")
+
+    # Precompute sample weights for final retraining on full training set
     sw_train = _compute_sample_weights(y_train)
 
     # Track all model scores for ensemble selection
     model_scores = {}
 
-    print("\nModel Evaluation (Macro F1 on validation set):")
+    logger.info("Model Evaluation (Mean Macro F1 across time-series CV folds):")
     for name, model in models.items():
-        if name in SAMPLE_WEIGHT_MODELS:
-            model.fit(X_t, y_t, sample_weight=sw_t)
-        else:
-            model.fit(X_t, y_t)
-        preds = model.predict(X_v)
-        score = f1_score(y_v, preds, average='macro')
+        fold_scores = []
+        for train_idx, val_idx in tscv.split(X_train_cv):
+            X_t_fold = X_train_cv.iloc[train_idx]
+            X_v_fold = X_train_cv.iloc[val_idx]
+            y_t_fold = y_train_cv.iloc[train_idx]
+            y_v_fold = y_train_cv.iloc[val_idx]
+
+            model_clone = clone(model)
+            sw = _compute_sample_weights(y_t_fold) if name in SAMPLE_WEIGHT_MODELS else None
+            if sw is not None:
+                model_clone.fit(X_t_fold, y_t_fold, sample_weight=sw)
+            else:
+                model_clone.fit(X_t_fold, y_t_fold)
+
+            preds = model_clone.predict(X_v_fold)
+            fold_scores.append(f1_score(y_v_fold, preds, average='macro'))
+
+        score = np.mean(fold_scores)
         model_scores[name] = score
-        print(f"  {name}: {score:.4f}")
+        logger.info(f"  {name}: {score:.4f} (folds: {[f'{s:.4f}' for s in fold_scores]})")
 
         if score > best_score:
             best_score = score
@@ -275,45 +291,61 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
         ]
 
         if len(top_model_names) >= 2:
-            print(f"\nBuilding soft-voting ensemble from {len(top_model_names)} "
-                  f"top models (within 0.05 of best {best_score:.4f})...")
+            logger.info(f"Building soft-voting ensemble from {len(top_model_names)} "
+                        f"top models (within 0.05 of best {best_score:.4f})...")
 
-            # Retrain each top model on the full sub-training set (X_t, y_t)
-            # to get fresh fitted instances for the ensemble
+            # Use a temporal split of X_train_cv (last 20%) for ensemble evaluation
+            ens_split_idx = int(len(X_train_cv) * 0.80)
+            X_ens_train = X_train_cv.iloc[:ens_split_idx]
+            y_ens_train = y_train_cv.iloc[:ens_split_idx]
+            X_ens_val = X_train_cv.iloc[ens_split_idx:]
+            y_ens_val = y_train_cv.iloc[ens_split_idx:]
+            sw_ens = _compute_sample_weights(y_ens_train)
+
+            # Train each top model on the ensemble training portion
             ensemble_estimators = []
             for name in top_model_names:
-                # Build a fresh (unfitted) copy preserving tuned hyperparameters
                 fresh_model = clone(models[name])
                 if name in SAMPLE_WEIGHT_MODELS:
-                    fresh_model.fit(X_t, y_t, sample_weight=sw_t)
+                    fresh_model.fit(X_ens_train, y_ens_train, sample_weight=sw_ens)
                 else:
-                    fresh_model.fit(X_t, y_t)
+                    fresh_model.fit(X_ens_train, y_ens_train)
                 ensemble_estimators.append((name, fresh_model))
 
             if len(ensemble_estimators) >= 2:
                 ens = SoftVotingEnsemble(ensemble_estimators)
-                ens_preds = ens.predict(X_v)
-                ens_score = f1_score(y_v, ens_preds, average='macro')
+                ens_preds = ens.predict(X_ens_val)
+                ens_score = f1_score(y_ens_val, ens_preds, average='macro')
+
+                # Also evaluate the best individual model on same ensemble validation set
+                best_indiv_clone = clone(models[best_model_name])
+                sw_indiv = _compute_sample_weights(y_ens_train) if best_model_name in SAMPLE_WEIGHT_MODELS else None
+                if sw_indiv is not None:
+                    best_indiv_clone.fit(X_ens_train, y_ens_train, sample_weight=sw_indiv)
+                else:
+                    best_indiv_clone.fit(X_ens_train, y_ens_train)
+                indiv_preds = best_indiv_clone.predict(X_ens_val)
+                indiv_score = f1_score(y_ens_val, indiv_preds, average='macro')
 
                 ens_names = " + ".join(n for n, _ in ensemble_estimators)
-                print(f"  Ensemble ({ens_names}): {ens_score:.4f} "
-                      f"vs Best Individual ({best_model_name}): {best_score:.4f}")
+                logger.info(f"  Ensemble ({ens_names}): {ens_score:.4f} "
+                            f"vs Best Individual ({best_model_name}): {indiv_score:.4f}")
 
-                if ens_score >= best_score:
-                    print(f"  -> Using ensemble (beats or ties best individual)")
+                if ens_score >= indiv_score:
+                    logger.info(f"  -> Using ensemble (beats or ties best individual)")
                     best_model_name = f"Ensemble({ens_names})"
                     best_score = ens_score
                     best_model = ens
                     use_ensemble = True
                 else:
-                    print(f"  -> Keeping best individual ({best_model_name})")
+                    logger.info(f"  -> Keeping best individual ({best_model_name})")
         else:
-            print(f"\nSkipping ensemble: only {len(top_model_names)} model(s) "
-                  "within 0.05 of best score (need at least 2).")
+            logger.info(f"Skipping ensemble: only {len(top_model_names)} model(s) "
+                        "within 0.05 of best score (need at least 2).")
     elif ensemble:
-        print("\nSkipping ensemble: fewer than 2 models available.")
+        logger.info("Skipping ensemble: fewer than 2 models available.")
 
-    print(f"\nBest Model: {best_model_name} (Retraining on full training set...)")
+    logger.info(f"Best Model: {best_model_name} (Retraining on full training set...)")
 
     # Retrain on full training set
     if use_ensemble:
@@ -338,15 +370,15 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
     # from diverse model types, which self-calibrates, and CalibratedClassifierCV
     # doesn't support our custom SoftVotingEnsemble.
     if use_ensemble:
-        print("Skipping probability calibration (ensemble already averages diverse models).")
+        logger.info("Skipping probability calibration (ensemble already averages diverse models).")
     elif calibrate:
         cal_size = len(X_train)
         if cal_size < 500:
             method = 'sigmoid'
-            print(f"Calibrating probabilities (sigmoid, cv=3) — dataset small ({cal_size} samples)...")
+            logger.info(f"Calibrating probabilities (sigmoid, cv=3) — dataset small ({cal_size} samples)...")
         else:
             method = 'isotonic'
-            print(f"Calibrating probabilities (isotonic, cv=3)...")
+            logger.info(f"Calibrating probabilities (isotonic, cv=3)...")
 
         calibrated = CalibratedClassifierCV(
             estimator=best_model,
@@ -362,21 +394,21 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
             calibrated.fit(X_train, y_train)
         best_model = calibrated
     else:
-        print("Skipping probability calibration (--no-calibrate).")
+        logger.info("Skipping probability calibration (--no-calibrate).")
 
     # --- Per-class threshold optimization ---
     # Use the held-out threshold split (X_thresh, y_thresh) to find thresholds that
     # maximize macro F1. This avoids double-dipping on the validation set used for
     # model selection.
-    print("\nOptimizing per-class decision thresholds on threshold-tuning set...")
+    logger.info("Optimizing per-class decision thresholds on threshold-tuning set...")
     best_thresholds, threshold_f1 = optimize_thresholds(best_model, X_thresh, y_thresh)
 
     baseline_preds = best_model.predict(X_thresh)
     from sklearn.metrics import f1_score as _f1
     baseline_f1 = _f1(y_thresh, baseline_preds, average='macro')
-    print(f"  Baseline macro F1 (argmax):      {baseline_f1:.4f}")
-    print(f"  Threshold-tuned macro F1:         {threshold_f1:.4f}")
-    print(f"  Optimal thresholds: { {int(k): round(v, 2) for k, v in best_thresholds.items()} }")
+    logger.info(f"  Baseline macro F1 (argmax):      {baseline_f1:.4f}")
+    logger.info(f"  Threshold-tuned macro F1:         {threshold_f1:.4f}")
+    logger.info(f"  Optimal thresholds: { {int(k): round(v, 2) for k, v in best_thresholds.items()} }")
 
     # Save the model and feature columns
     out_dir = root / "models"
@@ -395,12 +427,17 @@ def train_and_select_model(calibrate: bool = True, tune: bool = False,
     with open(thresholds_path, 'w') as f:
         json.dump(serializable, f, indent=2)
 
-    print(f"Model saved to {model_path}")
-    print(f"Feature columns saved to {cols_path}")
-    print(f"Thresholds saved to {thresholds_path}")
+    logger.info(f"Model saved to {model_path}")
+    logger.info(f"Feature columns saved to {cols_path}")
+    logger.info(f"Thresholds saved to {thresholds_path}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     parser = argparse.ArgumentParser(description="Train and select best model.")
     parser.add_argument(
         "--no-calibrate", action="store_true", default=False,

@@ -1,8 +1,11 @@
+import logging
 import os
 import pandas as pd
 from pathlib import Path
 from src.data.loader import load_results, get_project_root
 from src.utils.helpers import normalize_team_name
+
+logger = logging.getLogger(__name__)
 
 def clean_and_prepare_matches(cutoff_year: int = 1990) -> pd.DataFrame:
     """
@@ -47,12 +50,17 @@ def clean_and_prepare_matches(cutoff_year: int = 1990) -> pd.DataFrame:
     return df
 
 if __name__ == "__main__":
-    print("Cleaning matches data (cutoff year 1990)...")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logger.info("Cleaning matches data (cutoff year 1990)...")
     df_cleaned = clean_and_prepare_matches(cutoff_year=1990)
-    
+
     out_dir = get_project_root() / "data" / "processed"
     os.makedirs(out_dir, exist_ok=True)
     out_path = out_dir / "matches_cleaned.csv"
-    
+
     df_cleaned.to_csv(out_path, index=False)
-    print(f"Saved cleaned data to {out_path} ({len(df_cleaned)} matches)")
+    logger.info(f"Saved cleaned data to {out_path} ({len(df_cleaned)} matches)")

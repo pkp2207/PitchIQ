@@ -1,4 +1,6 @@
 import json
+import logging
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -11,6 +13,8 @@ from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.preprocessing import label_binarize
 from src.data.loader import get_project_root
 from src.models.threshold import apply_thresholds
+
+logger = logging.getLogger(__name__)
 
 
 def evaluate_model():
@@ -114,51 +118,56 @@ def evaluate_model():
         'Reliability Diagram': reliability,
     }
 
-    # --- Print results ---
-    print("=" * 60)
-    print("Evaluation Results on Test Set (Last 10% of time)")
-    print("=" * 60)
+    # --- Log results ---
+    logger.info("=" * 60)
+    logger.info("Evaluation Results on Test Set (Last 10% of time)")
+    logger.info("=" * 60)
 
-    print("\n--- Raw predictions (argmax) ---")
-    print(f"  Accuracy:    {raw_acc:.4f}")
-    print(f"  Macro F1:    {raw_f1:.4f}")
-    print("  Confusion Matrix:")
-    print(f"  {raw_cm}")
-    print(f"  Per-class report:")
+    logger.info("--- Raw predictions (argmax) ---")
+    logger.info(f"  Accuracy:    {raw_acc:.4f}")
+    logger.info(f"  Macro F1:    {raw_f1:.4f}")
+    logger.info("  Confusion Matrix:")
+    logger.info(f"  {raw_cm}")
+    logger.info(f"  Per-class report:")
     for cls_key in ['-1', '0', '1']:
         if cls_key in raw_report:
             r = raw_report[cls_key]
-            print(f"    Class {cls_key:>2}: precision={r['precision']:.3f}  "
-                  f"recall={r['recall']:.3f}  f1={r['f1-score']:.3f}")
+            logger.info(f"    Class {cls_key:>2}: precision={r['precision']:.3f}  "
+                        f"recall={r['recall']:.3f}  f1={r['f1-score']:.3f}")
 
-    print(f"\n--- Threshold-adjusted predictions ---")
-    print(f"  Thresholds:  { {int(k): round(v, 2) for k, v in thresholds.items()} }")
-    print(f"  Accuracy:    {adj_acc:.4f}")
-    print(f"  Macro F1:    {adj_f1:.4f}")
-    print("  Confusion Matrix:")
-    print(f"  {adj_cm}")
-    print(f"  Per-class report:")
+    logger.info("--- Threshold-adjusted predictions ---")
+    logger.info(f"  Thresholds:  { {int(k): round(v, 2) for k, v in thresholds.items()} }")
+    logger.info(f"  Accuracy:    {adj_acc:.4f}")
+    logger.info(f"  Macro F1:    {adj_f1:.4f}")
+    logger.info("  Confusion Matrix:")
+    logger.info(f"  {adj_cm}")
+    logger.info(f"  Per-class report:")
     for cls_key in ['-1', '0', '1']:
         if cls_key in adj_report:
             r = adj_report[cls_key]
-            print(f"    Class {cls_key:>2}: precision={r['precision']:.3f}  "
-                  f"recall={r['recall']:.3f}  f1={r['f1-score']:.3f}")
+            logger.info(f"    Class {cls_key:>2}: precision={r['precision']:.3f}  "
+                        f"recall={r['recall']:.3f}  f1={r['f1-score']:.3f}")
 
     delta_f1 = adj_f1 - raw_f1
     direction = "+" if delta_f1 >= 0 else ""
-    print(f"\n  Macro F1 change: {direction}{delta_f1:.4f}")
+    logger.info(f"  Macro F1 change: {direction}{delta_f1:.4f}")
 
-    print(f"\n--- Calibration metrics ---")
-    print(f"  Log Loss:    {logloss:.4f}")
-    print(f"  Brier Score: {brier_avg:.4f}")
-    print(f"  Calibrated:  {is_calibrated}")
+    logger.info("--- Calibration metrics ---")
+    logger.info(f"  Log Loss:    {logloss:.4f}")
+    logger.info(f"  Brier Score: {brier_avg:.4f}")
+    logger.info(f"  Calibrated:  {is_calibrated}")
 
     out_path = root / "models" / "evaluation_report.json"
     with open(out_path, 'w') as f:
         json.dump(results, f, indent=4)
 
-    print(f"\nSaved report to {out_path}")
+    logger.info(f"Saved report to {out_path}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     evaluate_model()

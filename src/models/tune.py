@@ -7,6 +7,7 @@ Usage:
 """
 import argparse
 import json
+import logging
 import os
 import numpy as np
 import pandas as pd
@@ -22,6 +23,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 from src.data.loader import get_project_root
+
+logger = logging.getLogger(__name__)
 
 # Models that need sample_weight in .fit() rather than class_weight in constructor
 SAMPLE_WEIGHT_MODELS = {'GradientBoosting', 'HistGradientBoosting'}
@@ -146,9 +149,9 @@ def tune_all(n_trials: int = 30) -> list[dict]:
     spaces = _get_search_spaces()
     results = []
     for name in spaces:
-        print(f"\nTuning {name} ({n_trials} trials)...")
+        logger.info(f"Tuning {name} ({n_trials} trials)...")
         result = tune_model(name, n_trials)
-        print(f"  Best F1: {result['best_f1']:.4f}  Params: {result['best_params']}")
+        logger.info(f"  Best F1: {result['best_f1']:.4f}  Params: {result['best_params']}")
         results.append(result)
 
     results.sort(key=lambda r: r["best_f1"], reverse=True)
@@ -167,15 +170,15 @@ def main():
 
     if args.model:
         results = [tune_model(args.model, args.n_trials)]
-        print(f"\n{args.model} — Best F1: {results[0]['best_f1']:.4f}")
-        print(f"  Params: {results[0]['best_params']}")
+        logger.info(f"{args.model} — Best F1: {results[0]['best_f1']:.4f}")
+        logger.info(f"  Params: {results[0]['best_params']}")
     else:
         results = tune_all(args.n_trials)
-        print("\n" + "=" * 60)
-        print("TUNING RESULTS (sorted by F1):")
+        logger.info("=" * 60)
+        logger.info("TUNING RESULTS (sorted by F1):")
         for r in results:
-            print(f"  {r['model']:25s}  F1={r['best_f1']:.4f}")
-        print("=" * 60)
+            logger.info(f"  {r['model']:25s}  F1={r['best_f1']:.4f}")
+        logger.info("=" * 60)
 
     if args.save:
         root = get_project_root()
@@ -183,8 +186,13 @@ def main():
         os.makedirs(out_path.parent, exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(results, f, indent=2)
-        print(f"\nSaved tuning results to {out_path}")
+        logger.info(f"Saved tuning results to {out_path}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     main()
